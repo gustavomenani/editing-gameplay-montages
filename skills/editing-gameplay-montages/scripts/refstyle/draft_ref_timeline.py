@@ -27,6 +27,8 @@ plan.json:
    "length": 30,                       # seconds the user asked for; the draft lands within length_tolerance of it
    "length_tolerance": 0.10,           # optional, default 0.10 (a fraction of length)
    "look": "modelo",                   # optional: LOOK of timeline.py (a preset name or a dict, SKILL.md "Edit options"); default "modelo"
+   "auto_bullet": true,                # optional, default true: where the drums thin out (a bar or so of weak kick and snare) and no kill is
+                                       # marked "bullet": "hit", the draft puts a bullet time into the kill on the next strong hit; false: never
    "intro": {"beats": 12,              # optional intro: bullet-time kills ("kills") or slow ability shots ("shots") at full frame
              "kills": [{"clip": "c02", "K": 640, "upto": 24}, ...],      # each: a 0.12-0.25x lead-in into this kill, then its death
              "shots": [{"clip": "c22", "a": 6650, "b": 6700}, ...],      # the older form: source frames shown in slow motion
@@ -61,6 +63,11 @@ What it decides, from the music (beat_hits.py: the measure of music_pulses.py) a
   * clip lengths: an even spread toward the length asked, 0.5 to 7 beats; the reference's pacing hint is the length the draft prefers;
   * the drop kill ("bullet": true): a 3 to 6 beat lead-in at 0.5x .. 0.2x (preferred 4 beats) with a white flash-in, an 8-frame ease up to
     real time, push-in 5 %, a riser, a boom; a "hit" bullet: a 2 to 3 beat lead-in at 0.5x, the same flash, riser and boom;
+  * a bullet time where the drums thin out ("auto_bullet", only when no kill is marked "hit"): in the body (after the drop, before the last take) it
+    looks for 1.5 beats or more where every half beat of kick / snare / hat falls under 25 % of the section's typical hit (the median hit; at most half
+    the section's mean level), after a passage that is at least 0.3 louder and followed within 2 beats by a strong hit. The most pronounced one
+    (the fall times its length up to a bar) becomes a "hit" bullet: the kill the draft places nearest after it is moved onto that strong hit
+    ("at") and drafted again, at most one per 30 s of video. When it cannot fit, or the drums do not thin out, a note says why;
   * intro kills: each take a slow lead-in (0.12 to 0.25x, shutter 2.2, no push, gunshot heard) into a kill on a measured hit, then its death;
   * levels, blur-ins (zoom burst on level 2 / 3 and bullet takes, whips alternating direction, a roll about every fourth take, the opening
     fades in), push-in 3 % (5 % over a bullet time, none in the intro and the calm ending), IMPACT / ACC, BUMPS (light pulses on the strong
@@ -109,8 +116,17 @@ SN2 = 0.9               # unclipped snare / clap strength from which a kill is a
 LV2_SHARE = 0.25        # at most this share of the takes at level 2 (the model: 5 of 21): on a song with loud hats on every half beat
                         # nearly every kill clears SN2, and level 2 everywhere is no accent; the strongest snares keep it
 BUMP_MIN, BUMP_PER_S, BUMP_GAP = 1.5, 0.42, 1.0     # unclipped strength floor, bumps per second at most (13 in 31 s), beats between two bumps
+THIN_WEAK = 0.25       # a half beat whose drum hit is under this share of the section's typical hit (the median hit) is weak
+THIN_MIN = 3           # weak half beats in a row that make a thin-out (1.5 beats)
+THIN_REL = 0.5         # ... at no more than this share of the section's mean level
+THIN_FALL = 0.3        # ... after a passage at least this much louder (0..1 of a typical hit, the 2 beats before)
+THIN_NEXT = 2.0        # beats after the thin-out within which a strong hit must come to land the bullet-time kill on
+THIN_PER_S = 30.0      # at most one automatic bullet time per this many seconds of video
+AUTO_ROOM = 1.5        # beats a strong hit must lie before the last take's kill to carry an automatic bullet time
+AUTO_SHIFT = 3.0       # beats the drafted kill may lie after that strong hit (it is moved onto it)
+AUTO_TRIES = 4         # drafts tried with a bullet time before the plain draft is kept
 KEYS = {"music", "bpm", "beat0", "drop_beat", "start_beat", "cuts_on", "lead_frames", "frame", "max_speed", "length", "length_tolerance", "look",
-        "intro", "ref_notes", "kills"}
+        "intro", "ref_notes", "kills", "auto_bullet"}
 SUM = "# draft_ref_timeline.py checksum (a changed file is never overwritten without --force): "
 
 
@@ -147,6 +163,9 @@ def load_plan(path):
     P.setdefault("length_tolerance", 0.10)
     P.setdefault("look", "modelo")
     P.setdefault("lead_frames", 14)
+    P.setdefault("auto_bullet", True)
+    if not isinstance(P["auto_bullet"], bool):
+        E.append('"auto_bullet" must be true (the default) or false, not %r' % (P["auto_bullet"],))
     if P["cuts_on"] not in ("bass", "kills"):
         E.append('"cuts_on" must be exactly "bass" or "kills", not %r' % (P["cuts_on"],))
     if P["frame"] not in ("horizontal", "vertical"):
@@ -1109,6 +1128,97 @@ def layout_intro_kills(ik, H, R0, t1, bass, T):
     return out
 
 
+# ------------------------------------------------------------------------------------------------ drum thin-outs
+def thin_outs(H, a, z):
+    """Stretches of the body (beats a .. z) where the drums fall away: -> (stretches, R, typ), most pronounced first.
+    The strength of a half beat is d = the loudest of kick / snare / hat in beat_hits' unclipped measure, read against the section:
+    v = min(1, d / R) with R = the median d of the half beats that carry a hit (d >= KICK), typ = the mean v over the body. A stretch is
+    THIN_MIN or more half beats in a row with v < THIN_WEAK that (1) sit at no more than THIN_REL of typ, (2) FALL from the 2 beats before them
+    (those average THIN_FALL or more above the stretch: a part that is quiet throughout is no thin-out) and (3) are followed, within THIN_NEXT beats
+    of their end, by a strong hit (STRONG) that can carry a kill. Rank: the fall, times the length in bars (at most one bar)."""
+    raw = H.raw
+    ua, uz = int(math.ceil(a * 2 - 1e-9)), int(math.floor(z * 2 + 1e-9))
+    body = [u for u in range(ua, uz + 1) if u in raw]
+    d = lambda u: max(raw[u])
+    hits = [d(u) for u in body if d(u) >= KICK]
+    if len(hits) < 8:
+        return [], None, None
+    R = float(np.median(hits))
+    v = lambda u: min(1.0, d(u) / R)
+    typ = sum(v(u) for u in body) / len(body)
+    out = []
+    u = ua
+    while u <= uz:
+        if u not in raw or v(u) >= THIN_WEAK:
+            u += 1
+            continue
+        e = u
+        while e + 1 in raw and v(e + 1) < THIN_WEAK:
+            e += 1
+        n = e - u + 1
+        run_u, u = u, e + 1
+        if n < THIN_MIN or e + 1 > uz:
+            continue
+        lv = sum(v(x) for x in range(run_u, e + 1)) / n
+        pre = [v(x) for x in range(run_u - 4, run_u) if x in raw]
+        lands = [x / 2.0 for x in range(e + 1, e + 2 + int(THIN_NEXT * 2)) if x in H.low and H.score(x) >= STRONG]
+        if len(pre) < 2 or not lands or lv > THIN_REL * typ:
+            continue
+        before = sum(pre) / len(pre)
+        if before - lv < THIN_FALL:
+            continue
+        out.append(dict(a=run_u / 2.0, e=(e + 1) / 2.0, n=n, level=lv, pct=100.0 * lv / typ, before=before, fall=before - lv,
+                        rank=(before - lv) * min(n, 8) / 8.0, lands=lands))
+    out.sort(key=lambda s: -s["rank"])
+    return out, R, typ
+
+
+def auto_bullets(takes, ib, D, H):
+    """The thin-outs of the body as bullet-time candidates. -> (cands, note): cands = [dict(ki (index in the plan's kills of the kill that
+    becomes the bullet), j (its take), h (the strong hit it lands on), s (the stretch), why)] best first; note says why there is none."""
+    n = len(takes)
+    last = takes[-1]
+    a = takes[ib].end if ib is not None else max(D, takes[0].first) + 0.5
+    z = last.start
+    stretches, R, typ = thin_outs(H, a, z)
+    where = "beats %s .. %s" % (fnum(a, 1), fnum(z, 1))
+    if R is None:
+        return [], "bullet time (auto): too few hits in %s to say where the drums thin out" % where
+    if not stretches:
+        return [], ("bullet time (auto): the drums do not thin out in %s (no stretch of %g beats or more with every half beat under %d %% of a typical hit "
+                    "[median hit %.2f], at %d %% of the section or less, after a louder passage and before a strong hit): no mid bullet time" % (
+                        where, THIN_MIN / 2.0, round(THIN_WEAK * 100), R, round(THIN_REL * 100)))
+    free = [j for j in range((ib if ib is not None else -1) + 1, n - 1) if takes[j].kind == "K" and takes[j].lkind is None and takes[j].at[0] is None]
+    cands, why_not = [], []
+    for s in stretches:
+        for h in s["lands"]:
+            if h > last.first - AUTO_ROOM:
+                why_not.append("the strong hit at beat %s is too near the last take (beat %s)" % (fnum(h), fnum(last.first)))
+                continue
+            js = [j for j in free if s["e"] - 0.5 <= takes[j].first <= h + AUTO_SHIFT]
+            if not js:
+                why_not.append("no single-kill take lands between beat %s and %s" % (fnum(s["e"] - 0.5, 1), fnum(h + AUTO_SHIFT, 1)))
+                continue
+            j = min(js, key=lambda x: takes[x].first)
+            cands.append(dict(ki=takes[j].kills[0]["i"], j=j, h=h, s=s, why=(
+                "the drums thin out over beats %s .. %s (drums at %d %% of the section's typical level, after 2 beats at %d %% of a typical hit), into the kill on the %s at beat %s" % (
+                    fnum(s["a"]), fnum(s["e"]), round(s["pct"]), round(100 * s["before"]), H.describe(int(round(h * 2))).split()[0], fnum(h)))))
+    if not cands:
+        s = stretches[0]
+        return [], ("bullet time (auto): the drums thin out over beats %s .. %s (drums at %d %% of the section) but no bullet time fits there: %s" % (
+            fnum(s["a"]), fnum(s["e"]), round(s["pct"]), "; ".join(dict.fromkeys(why_not))))
+    return cands, None
+
+
+def spaced(cands, per):
+    """the best candidates at least THIN_PER_S seconds apart (the list is ranked: a greedy pick)"""
+    out = []
+    for c in cands:
+        if all(abs(c["h"] - o["h"]) * per >= THIN_PER_S for o in out):
+            out.append(c)
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -1119,6 +1229,11 @@ def main():
     ap.add_argument("--compare", default=None, help="another timeline .py to print statistics for (e.g. the model edit's)")
     args = ap.parse_args()
     P, kills = load_plan(args.plan)
+    draft(args, P, kills, P["auto_bullet"])
+
+
+def draft(args, P, kills, find):
+    """One draft of the plan. find: look for a drum thin-out and, when the plan has no "hit" bullet, draft again with a bullet time into it."""
     if not os.path.isfile(args.example):
         die("%s not found: run this from the project folder (scripts/*.* and scripts/refstyle/*.* copied into it)" % args.example)
     tpl = open(args.example, encoding="utf-8").read()
@@ -1322,6 +1437,33 @@ def main():
         tk.end = takes[j + 1].start if j + 1 < n else R1
     best_snare = assign_levels(takes, H, ib, n)
 
+    # ---- where the drums thin out: a bullet time into the next strong hit (model-edit.md), unless the plan says otherwise
+    if find:
+        cands, anote = auto_bullets(takes, ib, D, H)
+        own = [tk for tk in takes if tk.lkind == "hit"]
+        if own:
+            far = [c for c in cands if all(abs(tk.first - c["h"]) > 4.0 for tk in own)]
+            if far:
+                notes.append('bullet time (auto): %s; the plan has its own "hit" bullet (beat %s), so none was added' % (far[0]["why"], ", ".join(fnum(tk.first) for tk in own)))
+        elif cands:
+            queue, failed = list(cands), []
+            for _ in range(AUTO_TRIES):
+                picks = spaced(queue, per)
+                if not picks:
+                    break
+                kills2 = [dict(k) for k in kills]
+                for c in picks:
+                    next(k for k in kills2 if k["i"] == c["ki"]).update(bullet=True, lkind="hit", at=c["h"], auto_why=c["why"])
+                try:
+                    return draft(args, P, kills2, False)
+                except SystemExit as e:
+                    why = [l.strip()[2:] for l in str(e.code).splitlines() if l.strip().startswith("- ")]
+                    failed.append("%s: %s" % (picks[0]["why"], (why[0] if why else str(e.code))[:300]))
+                    queue = [c for c in queue if c is not picks[0]]
+            notes.append("bullet time (auto): not added, the draft cannot hold it. " + " | ".join(failed))
+        else:
+            notes.append(anote)
+
     # ---- intro entries
     t1 = takes[0].start
     intro = []
@@ -1437,12 +1579,16 @@ def main():
                 risers.append(("drop", max(tk.start, R0 + 0.2), tk.first))
                 booms.append((tk.first, 0.26))
             else:
-                expl = ("bullet time into the kill on the strong hit at beat %s (%s): %.1f beats of lead-in at 0.5x .. 0.4x from beat %s, a white flash-in, a riser, a boom; %s%.1f beats long" % (
-                    fnum(tk.first), cut_on, tk.first - tk.start, fnum(tk.start), tail, Lt))
+                auto = tk.kills[0].get("auto_why")
+                expl = ("%s (%s): %.1f beats of lead-in at 0.5x .. 0.4x from beat %s, a white flash-in, a riser, a boom; %s%.1f beats long" % (
+                    "bullet time (auto): " + auto if auto else "bullet time into the kill on the strong hit at beat %s" % fnum(tk.first), cut_on, tk.first - tk.start, fnum(tk.start), tail, Lt))
                 risers.append(("hit", tk.start, tk.first))
                 booms.append((tk.first, 0.20))
                 nk = sum(1 for x in H.kicks if tk.start <= x / 2.0 < tk.first)
-                if nk >= 3:
+                if auto:
+                    notes.append("take %d: bullet time added by itself, %s (\"auto_bullet\": false in the plan turns it off; %d kick(s) inside its %.1f-beat lead-in)" % (
+                        j + 1, auto, nk, tk.first - tk.start))
+                elif nk >= 3:
                     notes.append("take %d (bullet \"hit\" at beat %s): the drums do not thin out here (%d kicks inside its %.1f-beat lead-in); the model puts this where the "
                                  "kick and snare weaken" % (j + 1, fnum(tk.first), nk, tk.first - tk.start))
             lines.append("    # take %d: %s" % (j + 1, expl))

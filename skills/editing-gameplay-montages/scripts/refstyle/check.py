@@ -30,7 +30,7 @@ For gate.py (the delivery gate): `import check` has no side effects; `analyze(vi
 which source frame the master's picture shows around the beat against the one the timeline asks for (-> list of dicts, nothing printed);
 `faithful(video, frames, T)` does the same around any output frames, to tell a jump or pause that is in the footage (the master matches the
 timeline: a shot that did not kill, an ability, a real pause) from one the render made."""
-import re, subprocess, sys, os, json
+import re, subprocess, sys, os, json, math
 import preflight
 import numpy as np
 import cv2
@@ -42,6 +42,8 @@ Wd, Hd = 270, 228
 TW, TH = (180, 320) if frame.VERT else (320, 180)          # overview tile
 # two bands of footage, above and below the lyric words (crop = w:h:x:y). Vertical: inside the 1080x608 window, clear of the 940 px words
 BANDS = ("1000:170:40:664", "1000:170:40:1090") if frame.VERT else ("1020:250:460:80", "1020:250:300:660")
+PRE_N = 6                                      # kill sync (alignment): frames measured before the shot ...
+PRE_CLEAR = PRE_N + 6                          # ... when the take started at least this many frames before it (5-frame blur-in + 1 clear)
 
 
 class Stop(Exception):
@@ -305,8 +307,12 @@ def _match(VID, cases, workers=6):
 
 def alignment(VID, T_=None, back=0, ahead=5):
     """For every kill: does the master show the source frames the timeline asks for around the beat? Nothing is printed. The master's frames
-    n0+j (n0 = the kill's frame, j = -back .. ahead; the take plays at real time there; a level 3 kill's impact frames +0..+2 are left out) against
-    the clip's frames, see _match. -> list of dicts: beat, level, take, clip, K, n0, measurable (False: a flat picture, nothing to match), delta
+    n0+j (n0 = the kill's frame) against the clip's frames, see _match. Which j: when the take has PRE_CLEAR frames or more before the shot
+    (the 14-frame lead of a drafted take, a bullet-time lead-in, a later kill of an M take), the frames -6 .. -1: footage only, before any
+    kill accent (punch, shake, exposure pop, radial burst, rays, inverted frame), so the measure is clean (measured on a vertical edit with
+    the model accents: 0.69 to 0.98 at offset 0 before the shot against 0.57 with a false best offset of +4 after a level-3 shot). A take cut
+    a few frames before its shot (the worked example's 4-frame lead): j = -back .. ahead after it, a level 3 kill's impact frames +0..+2
+    left out. -> list of dicts: beat, level, take, clip, K, n0, measurable (False: a flat picture, nothing to match), delta
     (the best offset; None when nothing matched: score under 0.5), score, clear (the score of delta against the score of 0: how clearly it beats
     'no offset'; a static scene has ~0 and says nothing), scores."""
     global T
@@ -315,7 +321,12 @@ def alignment(VID, T_=None, back=0, ahead=5):
     cases = []
     for q, (k, lv, i) in enumerate(T.KILLS):
         n0 = frame_of(k)
-        cases.append((q, i, n0, list(range(3 if lv == 3 else -back, (ahead + 2 if lv == 3 else ahead) + 1))))
+        lead = n0 - int(math.ceil((T.SEGS[i]["r0"] - T.R0) * T.FPB - 1e-6))     # output frames from the take's cut to this shot
+        if lead >= PRE_CLEAR:
+            js = list(range(-PRE_N, 0))
+        else:
+            js = list(range(3 if lv == 3 else -back, (ahead + 2 if lv == 3 else ahead) + 1))
+        cases.append((q, i, n0, js))
         kills[q] = (k, lv, i, n0)
     out = []
     for q, r in sorted(_match(VID, cases).items()):

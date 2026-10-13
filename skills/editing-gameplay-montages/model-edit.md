@@ -32,7 +32,7 @@ Prefer a late section (last chorus plus outro): it ends on a natural last word, 
 | the drop | that kill fires exactly on it: level 3 (inverted frame, biggest burst), a boom | |
 | the full band after the drop | one kill per take, about one per second, every kill on a measured kick or snare; the first kills after the drop come fastest (1 to 1.5 beats) | `cuts_on: "kills"` |
 | the strongest snare of the section | a level-3 kill, a boom | levels |
-| the drums thin out (a bar with weak kick and snare) | a second bullet time: 2 to 3 beats of slow lead-in with a white flash-in and a riser into the next strong snare, a boom | `"bullet": "hit"` on that kill; find the bar yourself on `music_pulses.py` / `music_spec.py` (the drafter does not search for it) |
+| the drums thin out (a bar with weak kick and snare) | a second bullet time: 2 to 3 beats of slow lead-in with a white flash-in and a riser into the next strong hit, a boom | the drafter finds it by itself (`auto_bullet`, on by default): 1.5 beats or more of drums under 25 % of a typical hit after a louder passage, then a strong hit within 2 beats; at most one per 30 s. Your own `"bullet": "hit"` on a kill, or `"auto_bullet": false`, overrides it |
 | the last vocal line | the best multi-kill (the ace) kill by kill, one kill every 1.5 to 2.5 beats, all from the same clip | plan order |
 | the last sung word | the final kill (level 3 but calm: no zoom, punch or shake), then slow motion at about 0.08x under the fade | the last kill of the plan, pinned with `"at"` on the beat of the last sung word |
 | strong hits that carry no kill | a light pulse and a 1.2 % nudge (a "bump") so the picture keeps moving with the drums | `BUMPS` (the drafter fills it from the measured hits) |

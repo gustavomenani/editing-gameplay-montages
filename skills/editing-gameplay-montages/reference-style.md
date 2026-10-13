@@ -105,13 +105,18 @@ each entry) and the statistics block, compare them with model-edit.md section 9,
 `drop_beat` and `start_beat` are TRACK beats (`music_tempo.py`): the first kill after the intro lands on `start_beat`
 (absent = the drop). The kill with `"bullet": true` (one) lands exactly on the drop after a 3 to 6 beat bullet-time
 lead-in with a white flash-in, a riser and a boom (an `L` entry); `"bullet": "hit"` (any number) gives a kill a 2 to 3
-beat lead-in with the same flash, riser and boom: put it on the kill after a bar where the drums thin out. The last
+beat lead-in with the same flash, riser and boom. Without one in the plan the drafter finds where the drums thin out
+by itself (`"auto_bullet"`, default true): in the body, 1.5 beats or more where the loudest of kick, snare and hat
+stays under 25 % of the section's typical hit and at most half its average, after 2 louder beats, followed within
+2 beats by a strong hit; the most pronounced one (at most one per 30 s) gets the "hit" bullet on the kill the draft
+puts nearest after it, and the take's comment and a note say why. If it cannot fit, the draft stays without it and
+the note gives the numbers; `"auto_bullet": false` turns it off. The last
 kill ends the video (calm take, slow motion, `LUMA_FADE`, 1.35 s of black). `intro.kills`: bullet-time kills over
 the intro (`intro.shots`, slow ability shots without a kill, are still accepted but break "no take without a kill").
 `with_previous` joins a kill to the take before it (same clip, later K: an `M` entry); kills of one clip closer than
 a lead plus a death join by themselves. `at` pins a kill to a timeline beat (a multiple of 0.5): the last kill on
 the beat of the last sung word, a kill the user wants on a given hit (off a measured hit it only warns).
-`lead_frames` (10 to 20, default 14), `look` (default `"modelo"`), `max_speed` (default 1.0).
+`lead_frames` (10 to 20, default 14), `look` (default `"modelo"`), `max_speed` (default 1.0), `auto_bullet` (default true).
 `ref_notes.json` (`ref_analyze.py`): its `pacing.clip_beats` is the clip length the draft aims for.
 
 Rules it applies: every take is cut `lead_frames` before its first shot (`CUT = LEAD_FRAMES / F`) and runs at real

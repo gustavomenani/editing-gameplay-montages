@@ -110,7 +110,9 @@ left (each line says what and how to fix it).
 - ERROR (refuse): timeline problems and fast-forward (preflight); file against timeline (size, 60 fps, frame
   count, duration, audio at 48 kHz); a master rendered from another `timeline.py` (`run.sh` stamps
   `timeline_sha1` into it); frozen frames; stalls and jumps the master does not reproduce from the footage; kill
-  sync (the master must show the source frames the timeline asks for around each kill); decoded peak above
+  sync (the master must show the source frames the timeline asks for around each kill: the 6 frames before the shot
+  when the take started 12 frames or more earlier, as every drafted take does, so no punch, burst or inverted frame
+  disturbs the measure; after the shot for a take cut a few frames before it); decoded peak above
   -0.5 dBFS; `mix.wav` / `audio_report.json` made for another `timeline.py`; a kill without gunshot (default
   style); kills hidden, not the player's, duplicated or on the wrong shot (`kill_rank.py`); a lyric word not in
   `lyrics.txt`; no `MAX_SPEED` while frames play above 1.25x (`no-ceiling`: waive it only for a user who asked for
@@ -122,7 +124,10 @@ left (each line says what and how to fix it).
 - `--json` prints the list; `--no-pixels` skips the decoding. 15 s to 2 min.
 - Measured on a full-length default-style master, the worked example and the house example: no false ERROR; the worked example's decoded peak of -0.41 dBFS is an
   ERROR, as the rule says. Planted faults (fast hand edit, silent kill, truncated master, +5 dB, a duplicated
-  frame, a timeline changed after `audio.py`) were each caught with their code.
+  frame, a timeline changed after `audio.py`) were each caught with their code. A full vertical model-style master
+  (24 kills, level-3 drop with its inverted frame) gave a false kill-sync ERROR while the sync was measured after the
+  shot (score 0.57, best offset +4 under the punch, shake and burst); before the shot every kill matches at offset 0
+  (0.69 to 0.98) and the gate passes.
 
 ## What no check tells you
 
