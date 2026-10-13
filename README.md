@@ -35,9 +35,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 No Git Bash: `bash install.sh`.
 
-O script copia a skill para `~/.claude/skills/editing-gameplay-montages`. Se já havia uma cópia, ela é guardada em `editing-gameplay-montages.backup-<data>`, com as anotações que o Claude tenha feito, e o caminho aparece na tela. Depois ele confere, em português, o que o computador precisa (Git for Windows, uv, ffmpeg, placa de vídeo com Vulkan, fonte Impact, espaço em disco) e mostra o comando exato do `winget` para o que faltar. Nada é instalado sem você pedir. Para o script rodar os comandos do winget por você, use `-Instalar` (`--instalar` no Git Bash). Depois de instalar algo, feche e abra o terminal.
+O script copia a skill para `~/.claude/skills/editing-gameplay-montages`. Se já havia uma cópia, ela é guardada em `editing-gameplay-montages.backup-<data>` e o caminho aparece na tela. Depois ele confere, em português, o que o computador precisa (Git for Windows, uv, ffmpeg, placa de vídeo com Vulkan, fonte Impact, espaço em disco) e mostra o comando exato do `winget` para o que faltar. Nada é instalado sem você pedir. Para o script rodar os comandos do winget por você, use `-Instalar` (`--instalar` no Git Bash). Depois de instalar algo, feche e abra o terminal.
 
-**Para atualizar:** `git pull` na pasta clonada e rode o `install.ps1` de novo.
+**Para atualizar:** `git pull` na pasta clonada e rode o `install.ps1` de novo. A skill instalada não é editada durante os seus vídeos: o que o Claude aprende num projeto fica no `LEIAME.md` daquele projeto (seção "Lições para a skill"), e a skill só muda quando você pede ("atualiza a skill"), pelo repositório. Por isso dá para atualizar por cima sem perder nada.
 
 O resto (venv, dependências Python, modelo RIFE) o Claude instala sozinho na pasta do projeto. Antes de começar, ele roda um diagnóstico (`doctor.py`) que testa tudo, inclusive o RIFE na sua placa de vídeo, e termina com `PRONTO` ou `FALTA: ...` e o que fazer.
 
@@ -48,7 +48,7 @@ mkdir -p ~/.claude/skills
 cp -r editing-gameplay-montages/skills/editing-gameplay-montages ~/.claude/skills/
 ```
 
-Antes de atualizar assim, guarde uma cópia de `~/.claude/skills/editing-gameplay-montages`, porque o Claude anota nela o que aprende nos seus projetos.
+Para atualizar assim, apague a pasta antiga antes de copiar a nova: a skill instalada não guarda nada seu.
 
 </details>
 
