@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+venv*/
+_editor*/
+*.mp4
+*.flac
+*.wav

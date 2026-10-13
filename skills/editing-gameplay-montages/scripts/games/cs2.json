@@ -1,0 +1,23 @@
+{
+  "game": "cs2",
+  "validated": false,
+  "frame": [1920, 1080],
+  "feed": {
+    "region": [1380, 48, 540, 360],
+    "row_h": 32,
+    "first_row_y": 72,
+    "row_pitch": 36,
+    "row_min_w": 150,
+    "align": "right",
+    "settle_frames": 14,
+    "own": {
+      "masks": [
+        {"name": "red outline", "hue": [[0, 4], [176, 179]], "s_min": 200, "v_min": 160, "min_px": 250}
+      ]
+    }
+  },
+  "weapon": {"region": [840, 400, 1080, 600]},
+  "ammo": {"region": [1720, 1004, 170, 62], "digit_min": 205},
+  "lag": {"feed_frames": [3, 20], "likely": [6, 12], "typical": 8, "audio_frames": [-1, 6], "audio_typical": 2.0},
+  "notes": "NOT validated on footage (none was available); every number comes from the game's HUD files and must be checked with kills_auto.py cs2 --regions <clip> <frame> on a real 1920x1080 recording. Sources: Panorama HUD files of CS2 (unofficial mirror github.com/dricotec/Counter-Strike2-Global-Offensive, extracted from the game): styles/hud/huddeathnotice.css and layout/hud/huddeathnotice.xml: the feed is right-aligned (padding-right 10 px), starts 72 px from the top (margin-top), one row per notice with 3 px between rows (row = padding 6/3 px + 24 px icons, about 33-36 px pitch), rows stay 5 s (7.5 s for the local player, 1 s fade-out) and FADE IN over 0.2 s; the local player's kills use class DeathNotice_Killer = a 2 px solid #e10000 border around the row on a near black fill (#000000e7); rows where the local player died use a dark red fill #630606d2 without the border (the own rule requires saturated bright red, v >= 160, so it does not match them). Ammo: styles/hud/hudweaponpanel.css: default weapon panel at the bottom right (padding-right 32 px, margin-bottom 16 px, bottom bar 54 px high, clip number 44 px bold white, magazine total 22 px) so the region above is the bottom-right corner box. UNCERTAINTY: those are Panorama pixels; the real size depends on the HUD scale (hud_scaling, 0.5-0.95, listed default 0.85 at totalcsgo.com/commands/hudscaling, which also lists CS:GO), so the true row pitch may be nearer 30 px and the feed top near y=61: the feed region and row_min_w were left generous for that. The 4:3 / stretched resolutions move the HUD: this profile is for 16:9."
+}

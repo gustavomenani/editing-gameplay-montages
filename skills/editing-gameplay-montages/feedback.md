@@ -1,0 +1,38 @@
+# After a delivery: what the user says, what to do
+
+The user watched the video; you cannot. Their words are the measurement. For each comment: measure what can
+be measured first (the "Check" column), change the smallest thing, re-run only what the change needs
+(pipeline.md, "What to re-run after a change"), deliver a NEW file (`_v2`, `_v3`, ...), and in the report quote
+their words and say what changed and the number before and after. One comment at a time is fine; several are
+done in one version.
+
+| They say | Check first | Change |
+|---|---|---|
+| "travado", "quedas de fps", "engasgando", "lag" | `check.py`: identical frames, stalls, unexplained jumps; `cadence.py` on the source frame it names | a stall at a whole source position in slow motion: the store (pitfalls.md, "Picture"); a duplicated source frame: `repair.py`; a real pause in the gameplay: say so or trim it out. If `check.py` is clean, look at the slow-motion and transition frames with `render.py A B x.jpg 2`, fix what you find, and say in the report which seconds you checked, so a time stamp from them can pin it down |
+| "slow motion travado" / "slow motion feio" | the store density there (`densify.py plan 12 28`), the slow-motion rate | `densify.py run` with lower thresholds; slower than 0.15x looks like a freeze: raise the rate (a drafted take never goes below 0.15x before the body is down); smear around the shot: keep 0.2 to 0.3 beat of real time after it (`tail()`, `post()`; `fall()` keeps 8 frames, `h`) |
+| "a kill tá fora do beat", "atrasada", "adiantada" | `sync_N.jpg` of that kill: on which tile does the flash start? | flash on `+1` or later: wrong K (`peek.py` every frame, set K to the first flash frame); flash on time but it feels off: the gunshot `lag` (`kill_lags.py`) or a kill on a beat with no hit (`music_pulses.py`): move it to a kick or snare |
+| "o tiro não bate com a música", "som atrasado" | `audio.py`'s per-kill offset; `kill_lags.py` for that kill | set the measured `lag`; a clip with voice chat over the shot: `voice=0.8` (house) or `mute=True` |
+| "a letra tá atrasada / adiantada / errada" | the `lyrics_align.py` table for that word | wrong word: fix `lyrics.txt`, `lyrics_lines.py`, `lyrics_align.py`; wrong time: `cue_onsets.py`, then `OVERRIDE` (reference-style.md, "Lyric words") |
+| "transição feia", "corte seco demais", "transição no lugar errado" | which transition (beat), its kind, `music_pulses.py`'s transitions line | another kind or direction (house `tin`, reference blur-in kind), `LOOK` `blur_in`; on a weak beat: move it to a kick (`CUTS_ON = "bass"`) |
+| "muito zoom", "zoom estranho" | is a zoom held for a whole shot? (the user rule) | `LOOK` `kill_zoom` 0.5 or 0; a take's `push` lower; never a standing crop |
+| "muito tremor" / "sem impacto" | which kills | `LOOK` `shake`, `flash`, `impact`, or the kill's level (1 / 2 / 3) |
+| "muito escuro", "muito claro", "cor lavada", "cor estourada" | stills of the frames they mean; `ffprobe` colour tags of the file | `LOOK` `contrast`, `saturation`, `vignette`, `grade` / `grade_amount`; washed-out colours on every player: the tags (bt709 tv) or an HDR source (`ingest.py` tone-maps it) |
+| "quero cor fria / quente / teal & orange / preto e branco" | | `LOOK` `grade` (+ `grade_amount`) (SKILL.md, "Edit options") |
+| "muito lento", "parado", "sem graça" | the speed shares (`timeline.py` print; `draft_timeline.py` statistics) | fewer slow-motion finishers, shorter takes, `LOOK` preset `"intensa"`, more kills per 10 s, `CUTS_ON = "kills"` for more cuts |
+| "acelerado do nada", "o clip acelera", "do nada fica muito rápido" | `check.py`'s "fast-forward:" line; `preflight.fast_forward(T)` lists each run above `MAX_SPEED` with its take and part (blur-in, between kills, after the shot); `MAX_SPEED` in timeline.py | `MAX_SPEED = 1.0` and draft again (`draft_ref_timeline.py --force`): the take enters at real time, the later kill of an `M` take lands at or after its real-time distance, slow motion eases back to real time; hand-written `post=` lists stay at or below real time; in an old edit delete the faulty take's `n=` and `post=` |
+| "muito rápido", "confuso", "não dá pra ver a kill" | | longer takes, 0.5 to 1.5 beats of real time after each kill, `LOOK` preset `"suave"`, `CUTS_ON = "bass"`; a kill that "nem aparece": `lead_frames` 16 in plan.json (the enemy longer on screen before the shot) |
+| "nem chegou a morrer", "corta antes de morrer", "a morte some" | `$PY deathstrip.py ds.jpg`: on which tile is the body down, and is that tile green? | raise that kill's `upto` in plan.json to the tile where the body is down and draft again (the next cut moves later); a take with no room: drop or move the next kill |
+| "não parece o edit modelo", "faltou sincronia", "sem vida entre as kills" | the drafter's statistics against model-edit.md section 9 (kills per 10 s, leads, deaths shown, bumps, levels) | the missing pattern: `"bullet": "hit"` where the drums thin out, `at` on the last sung word, levels on the strongest snares, `LOOK = "modelo"`, more kills on measured hits (model-edit.md, sections 2 and 3) |
+| "kill errada", "essa kill não aparece", "repetiu jogada", "não fui eu que matei" | `$PY kill_rank.py --check` and the `autokill` / `kill_rank` sheets: HIDDEN? conf `guess`? `no_shot`? the same footage in two files (`dupes.json`)? K after its feed row? | take the kill the check names out, or set K to the shot the sheet shows (the last ammo step before the row); drop the duplicate clip; take another from `kill_rank.json` |
+| "tira essa kill", "troca a ordem", "abre com X" | which kill (time in the video -> beat -> segment) | edit `plan.json` and draft again with `--force` (`draft_ref_timeline.py`; house style `draft_timeline.py`): it overwrites your hand edits, redo them |
+| "troca a música", "outra parte da música" | | `music_tempo.py` / `music_grid.py` for the new song or section, a new music block; every kill moves to new beats: draft the timeline again, `ranges.py`, `prep.py` |
+| "mais curto", "mais longo" | the number of kills that fit (the drafters refuse an unreachable length with numbers) | drop or add kills; `R1` and `FADE_OUT` |
+| "som estourado", "distorcido" | `check.py`'s decoded peak (must be below 0 dBFS) | `peakguard.py` (run.sh and deliver.sh call it); still loud: lower `GAME_LEVEL`, `KILL_THUMP`, the `BOOMS` gains (reference style) or the game and effect levels in `audio.py`; `HEADROOM = 0.5` when `audio.py` refuses the mix |
+| "música muito baixa / alta", "não ouço o tiro" | `mix_spec.py` around a kill | reference style: `GAME_LEVEL` (0.60 default, 0.95 in a draft) and `KILL_THUMP`; house style: the mix weights in `audio.py` (`0.84 * music + 0.60 * game + effects`) |
+| "ficou ruim no TikTok", "perdeu qualidade" | the upload copy's bit rate and frame rate | TikTok may cut 60 fps to 30 unless high-quality upload is on (verification.md); upload the `deliver.sh` copy, not the master |
+| "quero vertical / horizontal também" | | the same project with `FRAME` changed renders the other format from the same store (pipeline.md, "What to re-run"); the house style (on request) is vertical only |
+| "a capa" (outra, sem texto, outra cor) | | `cover.py` with another plate, style (`red`, `gold`, `silver`, `white`) or title; it never overwrites a cover: give a new name |
+| "perfeito", "ficou top", "JA ERA" | | the edit is done: change nothing they did not ask for; save what was learned (SKILL.md, step 12) |
+
+Anything you cannot map to a row: describe in the report what you think they mean and the one change you made
+for it, so their next message can correct you. Never answer feedback with a question list: decide, deliver, report.

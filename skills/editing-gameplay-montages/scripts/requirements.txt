@@ -1,0 +1,9 @@
+# Python 3.11 (the RIFE binding has no wheels for 3.14). Run these inside the project folder (<clips folder>/_editor/),
+# where the scripts were copied: run.sh and deliver.sh look for ./venv311 there.
+#   uv venv --python 3.11 venv311
+#   uv pip install --python venv311/Scripts/python.exe -r requirements.txt
+numpy==2.4.6
+opencv-python==5.0.0.93
+pillow==12.3.0
+scipy==1.17.1                      # reference style: lyrics_align.py, cue_onsets.py
+rife-ncnn-vulkan-python-tntwise==1.4.5

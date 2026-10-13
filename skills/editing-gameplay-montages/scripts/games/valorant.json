@@ -1,0 +1,29 @@
+{
+  "game": "valorant",
+  "validated": true,
+  "frame": [1920, 1080],
+  "feed": {
+    "region": [1300, 84, 616, 300],
+    "row_h": 34,
+    "first_row_y": 96,
+    "row_pitch": 39,
+    "row_min_w": 250,
+    "align": "right",
+    "own": {
+      "masks": [
+        {"name": "lime", "hue": [[22, 45]], "s_min": 90, "v_min": 180, "min_px": 120},
+        {"name": "teal", "hue": [[70, 100]], "s_min": 60, "v_min": 130, "min_px": 600},
+        {"name": "red", "hue": [[0, 12], [170, 179]], "s_min": 100, "v_min": 150, "min_px": 600}
+      ],
+      "band": ["teal", "red"],
+      "band_line_px": 20,
+      "order": ["teal", "red"]
+    }
+  },
+  "weapon": {"region": [840, 400, 1080, 600]},
+  "ammo": {"region": [1262, 998, 84, 44], "digit_min": 205},
+  "headshot": {"template": "valorant_headshot.png", "anchor": "red", "white_min": 190, "min_score": 0.6},
+  "visible": {"box": [700, 380, 520, 320], "std_max": 8.0, "edge_max": 6.0, "min_frames": 5},
+  "lag": {"feed_frames": [4, 12], "likely": [6, 10], "typical": 8, "audio_frames": [0, 5], "audio_typical": 2.2},
+  "notes": "Valorant 1920x1080 HUD default layout. Feed rows are appended downward from y~96; the player's own kill row has a lime accent, a teal killer part on the left and a red victim part at the right edge (a row where YOU died is red on the left, teal at the right edge: dropped; a teammate's row has no lime accent: dropped). Rows are tracked by colour (own.band) and the row is there when killer and victim colours both show. Ammo digits at bottom centre drop on the frame of the muzzle flash."
+}

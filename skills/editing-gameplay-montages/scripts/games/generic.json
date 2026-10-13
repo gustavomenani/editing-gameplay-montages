@@ -1,0 +1,18 @@
+{
+  "game": "generic",
+  "validated": false,
+  "frame": [1920, 1080],
+  "feed": {
+    "region": [1320, 60, 600, 420],
+    "row_h": 32,
+    "first_row_y": 72,
+    "row_pitch": 36,
+    "row_min_w": 160,
+    "align": "right",
+    "own": null
+  },
+  "weapon": {"region": [840, 400, 1080, 600]},
+  "ammo": null,
+  "lag": {"feed_frames": [3, 30], "likely": [6, 16], "typical": 10, "audio_frames": [-1, 6], "audio_typical": 2.0},
+  "notes": "Untuned fallback for any shooter: kill feed assumed at the top right, no own-kill rule (every feed row is reported, the review sheets decide which are yours), no ammo counter, weapon at the lower right. Run kills_auto.py --regions <clip> <frame> to check the regions, then copy this file to games/<game>.json and tune it."
+}

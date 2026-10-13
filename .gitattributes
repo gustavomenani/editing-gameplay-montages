@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.param -text
+*.bin binary
+*.gif binary
+*.jpg binary
