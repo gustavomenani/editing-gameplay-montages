@@ -37,7 +37,8 @@ file: put its size in the disk report.
 The numbers in this skill come from two finished edits (not included: they hold the author's footage):
 - the house example: house style, vertical, 37 s, 22 kills (`scripts/timeline_example.py` is its timeline);
 - the worked example: reference style, horizontal, lyric words, 46 s, 62 kills (`scripts/refstyle/timeline_ref_example.py`). Its extra files:
-  `detections.json`, `detect/`, `kills.json`, `lyric_cues.json`, `lyrics_whisper.json`, `posmap.json`, `cover/`.
+  `detections.json`, `detect/`, `kills.json`, `lyric_cues.json`, `posmap.json`, `cover/`. A project with lyric words also
+  holds `lyrics.txt` (the confirmed words) and `lyrics/` (voice stem, alignments, sync sheets).
 
 ## Setup
 
@@ -56,11 +57,14 @@ uv pip install --python venv311/Scripts/python.exe -r requirements.txt
 PY=./venv311/Scripts/python
 $PY doctor.py          # checks everything before the first ingest: packages, ffmpeg, the model, a real RIFE call on the GPU,
                        # Impact, disk, write permission, OneDrive / accents in the path. Ends with PRONTO (exit 0) or FALTA: ... (exit 1)
-# lyric words only: speech recognition in its own environment, not venv311. Tested with Python 3.14 and
-# faster-whisper 1.2.1 (in a venv outside the project; the project-folder form below was not run exactly as written):
-# large-v3 on the CPU takes about 4 min per minute of song, and its 3 GB download happens on first use.
+# lyric words only: two more venvs, neither is venv311.
+# separation + alignment (lyrics_sync.py calls it itself): Python 3.11, CPU torch, about 0.6 GB. Tested: torch 2.14.1+cpu,
+# torchaudio 2.11.0+cpu, demucs 4.1.0, soundfile 0.14.0, numpy 2.4.6 (requirements_sep.txt). First use downloads two
+# alignment models (1.2 GB each, torch hub cache) and the demucs weights (81 MB, Hugging Face cache).
+uv venv --python 3.11 venv_sep && uv pip install --python venv_sep/Scripts/python.exe -r requirements_sep.txt
+# speech recognition, only to READ the words of a song nobody pasted lyrics for (transcribe.py): Python 3.14 +
+# faster-whisper 1.2.1; large-v3 took 44 s for a 31 s voice stem on the CPU, its 3 GB download happens on first use.
 #   uv venv --python 3.14 venv_asr && uv pip install --python venv_asr/Scripts/python.exe faster-whisper numpy
-#   ./venv_asr/Scripts/python transcribe.py src/music.flac lyrics_whisper.json large-v3 <t_end seconds>
 ```
 
 `clips.json` (forward slashes, or doubled backslashes; UTF-8 with or without BOM, UTF-16 and ANSI files are all
@@ -140,12 +144,13 @@ Two settings that depend on the PC:
 | `music_tempo.py` | BPM with its half / double alternative and the evidence, fit strength (WEAK = no clear beat), provisional phase, loud sections, kick pattern, every drop | `$PY music_tempo.py` |
 | `music_grid.py` | exact first-beat time `BEAT0`, shifted-grid warning, corrected BPM when the given one drifts (use the BPM and BEAT0 it prints) | `$PY music_grid.py 130 0.423 27 72` |
 | `music_spec.py` | spectrogram labelled in timeline beats | `$PY music_spec.py [r0 r1]` |
-| `music_pulses.py` | kick / snare / hat strength on every half beat | `$PY music_pulses.py` |
+| `music_pulses.py` | kick / snare / hat strength on every half beat (the `beat_hits.py` measure, so it prints exactly what the drafters use) | `$PY music_pulses.py` |
 | `draft_timeline.py` | writes a correct first draft of a house-style `timeline.py` from `plan.json` (BPM, BEAT0, the drop's track beat, `cuts_on`, length, the kills in order with level / `continuous` / `lag`), explains every segment, refuses with numbers when the plan cannot fit (edit-design.md, "Drafting the timeline") | `$PY draft_timeline.py plan.json [-o timeline.py] [--force] [--compare timeline_example.py]` |
-| `beat_hits.py` | the measure of `music_pulses.py` as a function (used by `draft_timeline.py`) | imported |
+| `beat_hits.py` | the shared measure (both drafters, `music_pulses.py`): kick = the onset of 30..140 Hz (a bass guitar that keeps the band loud does not count), snare / clap = body (160..1500 Hz) and crack (1.5..8 kHz) arriving together, hat = the bright energy; the strongest within +-50 ms of each half beat (a live drummer drifts about 30 ms) | imported |
 | `preview.py` | rough preview of the whole edit in about half a minute, BEFORE `prep.py` (no store needed): the nearest real source frame for every output frame (no interpolation, no effects, slow motion steps frame by frame), the style's framing, hard cuts (an overlapping house transition is a cross-fade), the words as plain text, the song, a "PREVIEW" label; `--marks` frames every kill. Cuts and kills land on the same frames as the real render (worked example: 62 of 62 kills within 1 frame) | `$PY preview.py [preview.mp4] [--scale 0.5] [--marks]` |
 | `refstyle/ref_analyze.py` | reference style: everything the reference video does, measured (layout, cuts in beats, transition kinds, speed, words, colour, ending), plus SUGGESTED SETTINGS (reference-style.md, "Reading the reference") | `$PY ref_analyze.py "$REF" --music src/music.flac` |
 | `refstyle/draft_ref_timeline.py` | reference style: first-draft `timeline.py` from `plan.json` (entries, music block, intro words, luma fade; reference-style.md, "Drafting the entry list") | `$PY draft_ref_timeline.py plan.json [-o draft.py] [--force] [--compare timeline_ref_example.py]` |
+| `refstyle/lyrics_sync.py` | lyric words in one command: demucs voice stem of the section (`lyrics_stem.py`), CTC alignment of the confirmed words in `lyrics.txt` by two models (`lyrics_ctc_align.py`, both in `venv_sep`), mean refined on the stem (`cues_from_alignment.py`) -> `lyric_cues.json`, and `lyrics/sync_N.jpg` (`lyric_sync_sheet.py`); about 50 s for a 31 s section, cached re-runs in seconds (reference-style.md, "Lyric words") | `$PY lyrics_sync.py [--stem-only] [--t0 S --t1 S] [--models mms] [--red=A:B] [--last-end BEAT]` |
 | `timeline.py` | the edit; run it to print and self-check (it runs `preflight.py` first) | `$PY timeline.py` |
 | `preflight.py` | checks timeline.py and lists EVERY problem at once: clips missing from `src/`, anchors that do not increase, kills outside their segment or clip, a misspelled `CUTS_ON`, a song shorter than the edit, malformed `BUMPS`, `BOOMS`, `LUMA_IN`, `ACC`, `IMPACT`, sound levels or segment `white` / `shot_from`. `ranges.py`, `check_store.py`, `densify.py`, `render.py`, `audio.py`, `check.py`, `kill_lags.py` and `run.sh` run it themselves | `$PY preflight.py` |
 | `deathstrip.py` | when each enemy visibly dies: per kill 1:1 crops around the crosshair at K-8, K, K+4 ... K+52 and the kill feed at K+4 ... K+20; tiles the timeline shows are green, the rest red; prints per kill how many frames after the shot the edit shows and a WARNING when that is less than the entry's `upto`. `upto` for plan.json = frames from K until the body is down | `$PY deathstrip.py ds.jpg` (every kill of timeline.py, two per sheet), `$PY deathstrip.py ds.jpg c01@862 c04@303` (candidates), `--fine` (K to K+30 every second frame, wider crop) |

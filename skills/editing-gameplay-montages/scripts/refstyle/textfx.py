@@ -3,9 +3,18 @@ random order (one every 1-2 frames, white flash + colour split on the pop), meta
 glow, held while the word is sung, then a quick fade. Composited in linear light, before the transition
 blur, so a whip blurs the word together with the footage.
 
-Horizontal frame: caps of 250-280 px on the exact middle of the 1920x1080 frame. Vertical frame (timeline FRAME =
-"vertical", frame.py): the same words on the exact middle of the 1080x1920 canvas, i.e. over the middle of the
-gameplay window, caps at 0.62 of the horizontal ones and never wider than 940 px.
+Size, by the user's rule ("a letra sempre deve ficar no meio da tela centralizada e nao muito grande tampando tudo, mas com um
+tamanho consideravel"): caps of 226 px (the red intro words) / 202 px (the others) on the exact middle of the 1920x1080 frame,
+i.e. 21 / 19 % of its height, and the widest word at 70 % of the frame width (frame.py). Caps of 280 / 250 px, a 9-letter word over 86 %
+of the width, were "muito grande". Vertical frame (timeline FRAME = "vertical", frame.py): the same words on the exact middle of the
+1080x1920 canvas, i.e. over the middle of the gameplay window, caps at frame.CAP_K of the horizontal ones, never wider than 70 % of 1080.
+
+Ducking: the crosshair, i.e. the enemy, is on the same centre. A word steps back while a kill plays and stays back until the body
+is down (`duck_death`, at most `duck_max` beats after the shot; DEATH source frames after the shot, 22 by default: deathstrip.py
+measures 18-28), lighter for a short word, which covers less of the enemy.
+
+Per-project changes of a style: STYLE_OVERRIDES = {"gold": dict(strength=0.76, ...)} in timeline.py (absent = the defaults here; keys
+of a style below, `cap` in horizontal px: it is scaled by CAP_K in the vertical frame).
 
 T.TEXT = [(beat_in, beat_out, "WORD", style)], style in STYLES.  draw(canvas, n, r) paints frame n in place."""
 import math, os
@@ -29,13 +38,28 @@ STYLES = {
     # (keeps the texture of the footage visible inside the letters) instead of flat colour.
     # The user about the first render, where the letters were 82-94 % opaque: "as letras estavam sem
     # transparencia alguma 100% solidas". In the reference the footage shows through the letters.
-    "red":    dict(top=(255, 110, 96), mid=(238, 32, 40), bot=(120, 6, 16), glow=(255, 28, 34), glow_a=0.26, strength=0.80, ov=0.50, cap=280, cy=0.5, gloss=0.22),
-    "gold":   dict(top=(255, 246, 190), mid=(250, 204, 92), bot=(176, 110, 36), glow=(255, 196, 90), glow_a=0.08, strength=0.66, ov=0.62, cap=250, cy=0.5, gloss=0.14),
-    "silver": dict(top=(255, 255, 255), mid=(214, 222, 236), bot=(140, 150, 170), glow=(205, 222, 255), glow_a=0.07, strength=0.64, ov=0.62, cap=250, cy=0.5, gloss=0.12),
-    "white":  dict(top=(255, 255, 255), mid=(250, 250, 250), bot=(222, 222, 230), glow=(255, 255, 255), glow_a=0.07, strength=0.62, ov=0.62, cap=250, cy=0.5, gloss=0.0),
+    # cap = capital height in px at 1080p: frame.WORD_CAP_RED (226, the intro words) / frame.WORD_CAP (202, the rest)
+    "red":    dict(top=(255, 110, 96), mid=(238, 32, 40), bot=(120, 6, 16), glow=(255, 28, 34), glow_a=0.26, strength=0.80, ov=0.50, cap=frame.WORD_CAP_RED, cy=0.5, gloss=0.22),
+    "gold":   dict(top=(255, 246, 190), mid=(250, 204, 92), bot=(176, 110, 36), glow=(255, 196, 90), glow_a=0.08, strength=0.66, ov=0.62, cap=frame.WORD_CAP, cy=0.5, gloss=0.14),
+    "silver": dict(top=(255, 255, 255), mid=(214, 222, 236), bot=(140, 150, 170), glow=(205, 222, 255), glow_a=0.07, strength=0.64, ov=0.62, cap=frame.WORD_CAP, cy=0.5, gloss=0.12),
+    "white":  dict(top=(255, 255, 255), mid=(250, 250, 250), bot=(222, 222, 230), glow=(255, 255, 255), glow_a=0.07, strength=0.62, ov=0.62, cap=frame.WORD_CAP, cy=0.5, gloss=0.0),
 }
+# per-style behaviour that a project may change in STYLE_OVERRIDES; a style that sets none of these gets them
+DEFAULTS = dict(
+    duck=0.35,                        # how far a word steps back at a shot (a full-width word; see duck_scale), 0 = never
+    duck_after=0.28,                  # beats after the shot it stays back, at least
+    duck_death=True,                  # stay back until the enemy has fallen (DEATH source frames after the shot)
+    duck_max=0.60,                    # ...but never more than this many beats after the shot (a slow fall can take two beats)
+    shadow=(0, 7, 9, 0.12),           # (dx, dy, blur, strength) of the soft shadow under the letters, px at cap 226
+)
+_over = getattr(T, "STYLE_OVERRIDES", {})
+for _k in _over:
+    if _k not in STYLES:
+        raise SystemExit(f"timeline.py: STYLE_OVERRIDES has {_k!r}, which is not a style (they are: {', '.join(STYLES)})")
+for _k in STYLES:
+    STYLES[_k] = {**DEFAULTS, **STYLES[_k], **_over.get(_k, {})}
 for _st in STYLES.values():
-    _st["cap"] = int(round(_st["cap"] * frame.CAP_K))             # vertical: 0.62 (the caps of cover.py are set after this, in its own frame)
+    _st["cap"] = int(round(_st["cap"] * frame.CAP_K))             # vertical: frame.CAP_K (the caps of cover.py are set after this, in its own frame)
 PAD = 70                              # room around the word for glow / shadow
 LP = 18                               # room around a letter for the colour split
 
@@ -53,14 +77,41 @@ def frame_of(beat):
     return int(round((beat - T.R0) * T.FPB))
 
 
-def duck(r):
-    """The word steps back while a shot fires, so the kill itself stays readable."""
+DEATH = 22          # source frames after the shot in which the enemy falls (deathstrip.py: 18-28 on these clips)
+
+
+def _death_ends():
+    """Beat at which each kill's take reaches the shot frame + DEATH (or the take's end): the word stays stepped back
+    that long, so the fall is seen through it even in slow motion."""
+    out = []
+    for k, lv, i in T.KILLS:
+        s = T.SEGS[i]
+        K = float(s["map"](k)[0])
+        rs = np.linspace(k, s["r1"], 400)
+        p = s["map"](rs)[0]
+        j = np.searchsorted(p, K + DEATH)
+        out.append((k, float(rs[min(j, len(rs) - 1)])))
+    return out
+
+
+DEATH_ENDS = _death_ends()
+
+
+def duck(r, amount=0.35, after=0.28, death=True, cap=0.60):
+    """The word steps back while a shot fires, so the kill itself stays readable. amount = how far it steps back
+    (STYLES "duck"); after = beats after the shot it stays back (STYLES "duck_after"); death=True (STYLES "duck_death"): it
+    stays back until the enemy has fallen (DEATH source frames after the shot); cap (STYLES "duck_max", beats): never longer
+    than this after the shot. A slow-motion fall can take two beats: with kills every 1.5-2.5 beats an uncapped duck kept
+    see-through words faint for most of their cues."""
     m = 0.0
-    for k, lv, _ in T.KILLS:
+    for k, kend in DEATH_ENDS:
+        e = max(after, kend - k) if death else after
+        if cap is not None:
+            e = min(e, max(after, cap))
         d = r - k
-        if -0.16 < d < 0.28:
-            m = max(m, T.ease((d + 0.16) / 0.06) * T.ease((0.28 - d) / 0.08))
-    return 1.0 - 0.35 * m
+        if -0.16 < d < e:
+            m = max(m, T.ease((d + 0.16) / 0.06) * T.ease((e - d) / 0.08))
+    return 1.0 - amount * m
 
 
 class Cue:
@@ -90,13 +141,13 @@ class Cue:
                 xs.append(x)
                 x += font.getlength(ch) + track
             tot = x - track
-            if tot <= MAXW:
+            if tot <= st.get("maxw", MAXW):
                 break
-            size *= MAXW / tot
-        cap = CAPR * size
+            size *= st.get("maxw", MAXW) / tot
+        cap = self.cap = CAPR * size
         self.hb = hb = int(cap * 1.55) + 2 * PAD
-        self.y0 = int(round(st["cy"] * H - cap / 2 - 0.42 * cap)) - PAD          # top of the band on the canvas
-        base = PAD + 0.42 * cap + cap                                              # baseline inside the band
+        base = int(round(PAD + 0.42 * cap + cap))                                  # baseline inside the band (a whole row)
+        self.y0 = int(round(st["cy"] * H + cap / 2)) - base                        # top of the band on the canvas: the caps' middle is on cy * H
         x0 = W / 2 - tot / 2
         # vertical gradient over the cap height, with a glossy band in the upper third
         yy = (np.arange(hb, dtype=np.float32) - (base - cap)) / cap
@@ -133,13 +184,19 @@ class Cue:
             wt = m.shape[1]
             a0, a1 = max(0, xt), min(W, xt + wt)
             full[:, a0:a1] = np.maximum(full[:, a0:a1], m[:, a0 - xt:a1 - xt])
-        self.glow = np.clip(cv2.GaussianBlur(full, (0, 0), 16) - 0.55 * full, 0, 1)      # mostly outside the letters
-        sh = np.zeros_like(full); sh[7:] = full[:-7]
-        self.shadow = np.clip(cv2.GaussianBlur(sh, (0, 0), 9) - 0.0, 0, 1)
+        ks = cap / 226.0                                 # glow and shadow keep their proportion to the letters
+        self.glow = np.clip(cv2.GaussianBlur(full, (0, 0), 16 * ks) - 0.55 * full, 0, 1)      # mostly outside the letters
+        sx, sy, sb, self.shadow_a = st["shadow"]
+        sx, sy = int(round(sx * ks)), int(round(sy * ks))
+        sh = np.zeros_like(full)
+        sh[sy:, sx:] = full[:hb - sy, :W - sx] if sx > 0 else full[:hb - sy]
+        self.shadow = np.clip(cv2.GaussianBlur(sh, (0, 0), sb * ks), 0, 1)
         self.glowcol = lin(st["glow"])
         self.nlet = len(self.tiles)
         self.settled = None
         self.built = True
+        # a short word covers less of the enemy: its duck is lighter (half at 15 % of the frame width or less, full at 45 % or more)
+        self.duck_scale = 0.5 + 0.5 * min(1.0, max(0.0, ((self.ink[1] - self.ink[0] + 1) / W - 0.15) / 0.30))
 
     def layer(self, n):
         """(alpha per channel, premultiplied colour, share of letters visible) for frame n."""
@@ -187,7 +244,7 @@ def draw(canvas, n, r):
         if not cue.built:
             cue.build()
         f = 1.0 - T.ease((r - cue.b) / cue.fade)
-        f *= duck(r)
+        f *= duck(r, cue.st["duck"] * cue.duck_scale, cue.st["duck_after"], cue.st["duck_death"], cue.st["duck_max"])
         if f <= 0.004:
             continue
         a3, c3, share = cue.layer(n)
@@ -197,7 +254,7 @@ def draw(canvas, n, r):
         reg = canvas[ya:yb]
         sl = slice(ya - y0, yb - y0)
         a3, c3 = a3[sl], c3[sl]
-        reg *= (1 - cue.shadow[sl, :, None] * np.float32(0.12 * f * share))
+        reg *= (1 - cue.shadow[sl, :, None] * np.float32(cue.shadow_a * f * share))
         # translucent letters, as in the reference: mostly an overlay blend (the footage keeps its texture inside
         # the letters, dark things in front stay dark) plus some flat colour so the word still reads on dark scenes
         base = np.clip(reg, 0, 1) ** np.float32(1 / GAMMA)                 # display values

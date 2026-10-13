@@ -60,7 +60,7 @@ with `"$FF" -v error -ss T -i "$REF" -frames:v 1 -vf "crop=1500:560:210:230,scal
 | cut position | just before the hit | drafted: `LEAD_FRAMES` (14, 12 to 16 at any tempo; `CUT = LEAD_FRAMES / F` beats) before the take's first shot, so a kill on the beat gets its cut about an eighth earlier and the enemy is seen before he dies. Which beats: `CUTS_ON` (the user's choice in the briefing). `"kills"` (default, the model edit): a cut before each take's first kill. `"bass"` (an editor's note: "as transições rolarem nos graves da música, não no snare"): the cut lands on a kick / 808 and the take's first kill on the first hit at least `LEAD_FRAMES` after it; snare and hat kills go inside takes (`M` entries). The worked example cut 0.15 beat (4 frames) before each kill (19 of its 57 cuts land on a kick, measured): a kill that soon after a cut "nem aparece" |
 | blur-in | horizontal whip with thin streaks, zoom burst with rays, rotated whip, red/cyan split | `blur_in()` and `streaks()` in render.py: post effects on the finished frame, strength `(1 - q/5)^2` |
 | pacing | 16th-note runs, 8th and quarter-note clips | drafted (`"kills"`): one kill per take about every second on measured hits, never closer than `(LEAD_FRAMES + upto) / FPB` beats between takes (about 0.6 s; closer kills of one clip share a take); the drop kill in bullet time; `"bullet": "hit"` kills get a short bullet time where the drums thin out (model-edit.md, sections 2 and 3). `"bass"`: the kicks set the clip lengths, so sparse 808s give takes of 2 beats or more with the snare and hat kills inside them. The worked example: sparse 808s: 2-beat clips; hats on every half beat: 1-beat clips with a few half-beat runs |
-| lyric words | Impact caps, about 23 % of the frame height, letters pop in random order, see-through tinted fill, red in the intro | `textfx.py` (needs Impact, or `IMPACT_FONT` = a .ttf path; `render.py` imports it, so without the font nothing renders); see "Lyric words" |
+| lyric words | Impact caps, about 23 % of the frame height, letters pop in random order, see-through tinted fill, red in the intro | the user's size, not the reference's: caps 21 % (red intro) / 19 % of the frame height, the widest word at 70 % of the frame width, on the exact centre; letters pop in random order, see-through tinted fill, red in the intro, the word steps back while a kill plays. `textfx.py` (needs Impact, or `IMPACT_FONT` = a .ttf path; `render.py` imports it, so without the font nothing renders; `STYLE_OVERRIDES` in timeline.py changes a style); see "Lyric words" |
 | look | sharp, saturated, colour fringes at the edges | per-channel zoom `CA0 = 0.0011`, saturation 1.20, S-curve, `unsharp 0.55` at encode |
 | edit options | the worked example's values, adjustable per request | `LOOK` in timeline.py (SKILL.md, "Edit options"; `scripts/look.py`), read in both frames. `"modelo"` (the drafter's default) is the model edit's look: exposure 1.10, saturation and vignette up, a faint wide glow (measured on 19 frames against that edit: luma +3.5 %, saturation -0.5 %, corner/centre -0.4 %). Differences from the house style: no visible grain by default (`grain` above 1 adds a fine film grain, at or below 1 changes nothing); `kill_zoom` scales the kill punch, the 2-frame lean into a cut, the `IMPACT` radial burst and the bump nudge, never the take's slow push-in; `fringe` scales the colour split, `flash` the exposure pop and the bump light; `impact` False removes the inverted frame of level-3 kills; `bars` (2.39:1, horizontal only, drawn last so no blur-in moves them; they hide the kill feed and the ammo, and never reach cover plates); `blur_in` scales the whip / zoom burst / roll (0 = a plain hard cut). Absent or `"padrao"`, and no `IMPACT` / `ACC` / `BUMPS` / `LUMA_IN` / `white` in the timeline: byte-identical to the worked example's render |
 | intro | slow cinematic shots without HUD | drafted: `intro.kills`, bullet-time kills at FULL FRAME over the song's break (0.12 to 0.25x lead-ins, `shutter=2.2`, `push=0`, `intro=True`, gunshots heard), the opening reveals the bright areas first (`LUMA_IN`), the last 4 beats a bullet time with a white flash-in into the drop kill: no take without a kill ("tem um clip do phoenix que nao mata ninguem"). The worked example used ability shots without kills (`intro.shots`, `mute=True`, red words), still accepted. Never a crop to hide the HUD |
@@ -107,10 +107,11 @@ each entry) and the statistics block, compare them with model-edit.md section 9,
 lead-in with a white flash-in, a riser and a boom (an `L` entry); `"bullet": "hit"` (any number) gives a kill a 2 to 3
 beat lead-in with the same flash, riser and boom. Without one in the plan the drafter finds where the drums thin out
 by itself (`"auto_bullet"`, default true): in the body, 1.5 beats or more where the loudest of kick, snare and hat
-stays under 25 % of the section's typical hit and at most half its average, after 2 louder beats, followed within
+stays under 35 % of the section's typical hit and at most half its average, after 2 louder beats, followed within
 2 beats by a strong hit; the most pronounced one (at most one per 30 s) gets the "hit" bullet on the kill the draft
 puts nearest after it, and the take's comment and a note say why. If it cannot fit, the draft stays without it and
-the note gives the numbers; `"auto_bullet": false` turns it off. The last
+the note gives the numbers; never in the last two bars before the last kill (they belong to the ending: the ace kill
+by kill); `"auto_bullet": false` turns it off. The last
 kill ends the video (calm take, slow motion, `LUMA_FADE`, 1.35 s of black). `intro.kills`: bullet-time kills over
 the intro (`intro.shots`, slow ability shots without a kill, are still accepted but break "no take without a kill").
 `with_previous` joins a kill to the take before it (same clip, later K: an `M` entry); kills of one clip closer than
@@ -138,20 +139,23 @@ lead and a death, too few kicks for the takes in `"bass"`, a take longer than 7 
 the kills cannot fill: it says how many seconds they can make). Kills without `upto` get 24 frames and a note:
 measure them (`deathstrip.py`), a wrong value cuts a death short or holds a corpse. It never overwrites a
 `timeline.py` you edited (`--force` does); `--compare other_timeline.py` prints the same statistics for another
-timeline. Lyric cues stay `lyrics_align.py`'s job.
+timeline. Lyric cues come from `lyrics_sync.py` ("Lyric words").
 
 Measured on the model edit's song and footage: a plan with the model's kills in order, their `upto`, its intro,
 drop and mid bullet times, and `at` pins drafts the model back (30.9 s, 21 takes, 24 kills on the same beats, gaps
 median 2 / min 1 beat, a 14-frame lead on every take, 20 of 20 deaths shown, levels 15 / 6 / 3, 13 bumps, 4 booms,
 2 risers, 65 % of the frames below 0.6x against the model's 64 %, fastest frame 1.00x against its 1.17x). The same
 plan without `at` (the kills free) keeps the rhythm (median gap 2 beats, a 14-frame lead on every take, every death
-shown, 13 bumps, 60 % below 0.6x) with the kills on other measured hits, but levels 18 / 3 / 3: on that band mix the
-bass fills the low band on almost every half beat (low 1.00 in `music_pulses.py`) and the snare shows only in the
-high band, so few kills count as backbeat snares (give `level` in the plan to the kills on the backbeat where
-`music_spec.py` shows the snare). Drafts on another drop of the song (26 s) and with `"bass"` (35 s, 13 of 13 cuts
-on a kick, every lead 14.5 frames) pass every check, and the plans of the previous drafter (`intro.shots`, `"bass"`,
-`max_speed` null) still draft. The same 24 kills on a 130 BPM trap song: 30.7 s, every kill on a measured hit there
-(6 kicks, 4 snares, 14 loud hats), median gap 2 beats = 0.92 s, levels 15 / 6 / 3, 13 bumps, all checks pass.
+shown, 13 bumps) with the kills on other measured hits (14 kicks, 8 snares), levels 15 / 6 / 3 with level 2 on the
+backbeat snares, and puts its automatic bullet time where the drums drop out over beats 10.5 .. 12. That needs the
+measure of `beat_hits.py` (kick = the onset of 30..140 Hz, snare = body and crack arriving together): with the old
+energy measure the band's bass guitar read as a kick on almost every half beat and the snare showed only in the high
+band (1 of 12 backbeat snares found, now 12 of 12; false kicks 13 instead of 30). Drafts on another drop of the song
+(26 s) and with `"bass"` (35 s, 13 of 13 cuts on a kick, every lead 14.5 frames) pass every check, and the plans of
+the previous drafter (`intro.shots`, `"bass"`, `max_speed` null) still draft. The same 24 kills on a 130 BPM trap
+song: 30.7 s, every kill on a measured hit there (8 kicks / 808s, 3 snares / claps, 13 loud hats), median gap
+2 beats = 0.92 s, levels 15 / 6 / 3 (few kills sit on claps there, so the strongest other hits fill level 2), 13
+bumps, the automatic bullet time on the 808 gap at beats 28 .. 30, all checks pass.
 The plan order is kept (it never reorders or drops a kill: the refusal says which take to change).
 A full horizontal render of the free draft (30.6 s, 21 takes, 24 kills): 1838 frames, 0 identical, 1 stall (at the
 source frame where the model's own render has one: a pause in the recording), 0 unexplained jumps, no fast-forward,
@@ -175,16 +179,21 @@ blur-in kinds and timing, slow motion, lyric words, luma fade and cover.
   `LUMA_IN`, the light rays, the inverted level-3 frame, the white flash-in and the luma fade act on the whole
   canvas, as an editor applies a whip or zoom to the whole composition (a window-only blur-in leaves a dead
   backdrop around it).
-- **Words.** Exact centre of the 1080x1920 frame (over the crosshair, as in horizontal), caps 0.62 of the
-  horizontal ones (about a quarter of the window height), widest word 940 px; same rules: one word per cue,
-  translucent, ink centred, ducked on shots. `$PY text_test.py vertical` shows them before the timeline says so.
+- **Words.** The same words on the exact middle of the 1080x1920 canvas, i.e. the middle of the gameplay window.
+  Caps are 0.60 of the horizontal ones (135 / 121 px: 22 / 20 % of the window's height, a little above the window's
+  own 0.5625 scale because a phone shows the frame small), the widest word 70 % of the width (756 px). Same rules: one
+  word per cue, translucent, ink centred (measured within 1 px), stepping back on shots. `$PY text_test.py vertical`
+  shows them and prints the numbers before the timeline says so.
 - **Cover.** `cover_plates.py` and `cover.py` make a 1080x1920 cover (cap 200, ink within 900 px).
 - **Measured** on 200 frames of the worked example rendered vertical from its store: 0 identical, 0 stalled
   frames, judder no worse than the same frames horizontal, render about 8 % slower. Horizontal output is
   byte-identical to before the vertical frame existed. Full-length vertical edit in the default style (32.6 s,
   16 kills, draft untouched): 1958 frames, 0 identical, 1 stalled (the known false positive on the frame before
   the intro cut), 8 one-frame jumps all on kills, accents or cuts, judder 0.165, flashes 10 on +0, 5 faint on +0,
-  1 on +1 as predicted, -9.9 LUFS, decoded peak -1.22 dBFS; render 12 min at 2.9 fps.
+  1 on +1 as predicted, -9.9 LUFS, decoded peak -1.22 dBFS; render 12 min at 2.9 fps. Full-length vertical edit with
+  the model edit's patterns (30.6 s, 24 kills, drafted untouched, automatic bullet time, level-3 inverted frames):
+  1838 frames, 0 identical, 1 stall (a pause in the recording), 0 unexplained jumps, no fast-forward, judder 0.240,
+  flashes as predicted, -7.5 LUFS, decoded peak -1.19 dBFS, the delivery gate passes; render 10 min at 3.2 fps.
 
 Other output sizes or rates are not built: `FPS` in the timeline is the output rate and the rate the anchors
 assume. A 30 fps reference does not change it: deliver 60 fps (stutter is the user's first complaint) and
@@ -250,71 +259,68 @@ used here; `kill_table.py` would overwrite `kills.json` with another layout.
 
 ## Lyric words
 
-Procedure (in the project folder; `$PY` = the project venv; step 1 runs in the speech-recognition venv of
-pipeline.md, "Setup"):
+Procedure (in the project folder; `$PY` = venv311; the separation and alignment steps run in `venv_sep`, which
+`lyrics_sync.py` calls itself; both venvs: pipeline.md, "Setup"):
 
-1. `transcribe.py`: set `LANG` and `PROMPT` in the file or pass `--lang CODE --prompt "..."`, then
-   `./venv_asr/Scripts/python transcribe.py src/music.flac lyrics_whisper.json large-v3 <t_end>`. `t_end` is the
-   track time where the edit ends (`T.beat_time(T.R1)`), not the whole song.
-2. Get the lyrics: the ones the user pasted in the briefing answer, or confirm each recognised line against a
-   lyrics page (first bullet below).
-3. Write the confirmed lines to `lyrics.txt`: one line per sung line, in song order, any case and accents.
-   Blank lines, lines starting with `#` and `[Refrão]` headers are ignored. A typo, a missing syllable or a
-   line outside the video is fine.
-4. `$PY lyrics_lines.py` (reads `lyrics.txt` and `lyrics_whisper.json`, writes `lines.json`; any recogniser
-   split, merge, missed or extra word is aligned automatically). Read its table:
-   - status `ok`, `fuzzy` (similar spelling), `rec-split`, `rec-merged`, `est` (no recognised word: time
-     estimated, marked `~`); `?` marks a doubtful word;
-   - every line is `ok` or `LOW: <reason>`. LOW lines are NOT written: fix the typed words or leave the line
-     out (`--keep-low` writes them anyway);
-   - "recognised words that match no typed word" lists sung words missing from `lyrics.txt` (a forgotten line);
-   - optional second pass: `transcribe.py ... --lyrics lyrics.txt` gives the recogniser the lyrics as a
-     prompt; keep whichever recognition leaves fewer LOW lines (untested on the real model so far).
-   Measured on the worked example's song: all 90 word times equal the hand-made ones, and with the same overrides the
-   74 cues come out identical to the worked example's `lyric_cues.json`.
-5. `$PY lyrics_align.py` reads `lines.json` and writes `lyric_cues.json` (`[beat_in, beat_out, "WORD", style]`)
-   and a table: word, recognised beat, chosen beat, difference in ms (`~` on estimated words). A word that
-   moved by more than about 100 ms is looked at in step 6. A filled `LINES` in the script (the old manual way:
-   entries `(t0, [words])` mapped one to one onto consecutive recognised words) still wins over `lines.json`.
-   After re-running `transcribe.py`, run `lyrics_lines.py` again: `lyrics_align.py` refuses a stale `lines.json`.
-6. Where doubtful: `$PY cue_onsets.py` lists, for each recognised word, the vocal onsets within 0.14 s
-   (beat, dB rise) and the nearest 16th. Then in `lyrics_align.py`:
-   - `OVERRIDE = {("WORD", beat_from, beat_to): beat}` applies to a corrected word equal to WORD whose
-     RECOGNISED beat (the table's second column) lies in the range. `beat` is where the cue starts to show;
-     its onset counts as 0.04 beat later (`ADV`: the automatic choice shows every cue 0.04 beat before its
-     onset), which is what the table then prints as "chosen". To put the onset on the beat B of the
-     `cue_onsets.py` list, give `B - 0.04`.
-   - `DROP = {("WORD", beat)}` leaves that word out of the cues. `beat` is the recognised beat rounded to ONE
-     decimal (`round(b, 1)`: a table value of 12.34 is 12.3; at x.x5 check which way Python rounds). A dropped
-     word still takes part in the timing of the others and still has its row in the table.
-   - `RED = [(beat_from, beat_to), ...]`: cues starting inside a range are red, all others cycle gold, silver,
-     white. The default is only the intro (before beat -0.5); a song's red breakdown goes in here.
-   Run step 5 again.
-7. `$PY text_test.py` (`text_test.jpg`), `$PY timeline.py` (the "words on screen" line), stills of a few words.
+1. The words. The lyrics the user pasted, or: `$PY lyrics_sync.py --stem-only` (the voice of the edit's section,
+   `lyrics/vocals.wav`), then in the speech-recognition venv
+   `./venv_asr/Scripts/python transcribe.py lyrics/vocals.wav lyrics_whisper.json large-v3 --offset <t0 of lyrics/stem.json> --lang CODE`
+   to read which lines the section holds, and confirm every line against a lyrics page (first bullet below).
+   Recognition is for reading only: its word times ran up to 3.5 beats early and put whole lines one word early.
+2. Write `lyrics.txt`: the confirmed words of the section, one line per sung line, in song order, EVERY word sung
+   between the section's start and end (also words that stay off screen). Blank lines, lines starting with `#` and
+   `[Refrão]` headers are ignored. A token is one word: `word`; `sung=SHOWN` when the sung form differs from the screen
+   text (`takin=TAKING`); `sung=-` for a word that is aligned but not shown; `word@12.34` pins a word at timeline beat
+   12.34. Numbers and symbols are written as sung (`lyrics_words.py` holds the format).
+3. `$PY lyrics_sync.py`. The section is the video's own part of the song (timeline R0..R1; `--t0 S --t1 S` to change
+   it; start where the voice is silent when you can). It separates the voice with demucs (htdemucs, only that
+   section), aligns the typed words twice by CTC (torchaudio MMS_FA and WAV2VEC2_ASR_LARGE_LV60K_960H; `--models mms`
+   for a song that is not in English), takes the mean, refines each start on the stem and writes `lyric_cues.json`
+   (`[beat_in, beat_out, "WORD", style]`) and `lyrics/sync_N.jpg`. Options: `--red=A:B` (red beat ranges, default the
+   intro before beat -0.5), `--last-end BEAT` (the last word leaves before the final kill), `--adv`, `--redo`, `--force`.
+   Stem and alignment are cached: a re-run after a `lyrics.txt` fix takes seconds.
+4. Read its table (word, chosen beat, aligned beat, difference in ms, how, how far the two models were apart) and its
+   CHECK list. If the models put a word over 0.35 s apart it stops: the typed words do not match the singing there
+   (a line missing or extra, another wording, a section that starts inside a sung line); fix `lyrics.txt` or the
+   section.
+5. Read `lyrics/sync_*.jpg`: every red line on the left edge of its syllable (after a dip = a consonant, or where the
+   voice returns after a silence), under its yellow label. A word that is wrong goes into `lyrics.txt` with `@beat`
+   (read the beat off the sheet's white level-rise ticks); then run step 3 again.
+6. `$PY text_test.py` (and `text_test.py vertical`), `$PY timeline.py` (the "words on screen" line), stills of a few
+   words over gameplay.
 
-- **Right words only.** Speech recognition (`transcribe.py`: faster-whisper large-v3 in its own venv)
-  gets about half of a trap verse wrong. Confirm each line against a lyrics page with yes/no questions
-  through WebFetch (`letras.com.br`, `vagalume.com.br`; it will not quote lyrics, it does confirm
-  phrases). Unconfirmed lines get no text. If nothing can be confirmed: no lyric words at all; artist and
-  title over the intro are not recognised speech and may stay.
-- **A new project has no cues** until `lyrics_align.py` writes `lyric_cues.json`; the intro words typed in the
-  timeline (`_T`) do show, until you replace them. `$PY timeline.py` ends with the number of cues and the
-  first words: read that line.
-- **Timing.** `lyrics_align.py` (from `lines.json`, or `LINES`): harmonic/percussive split (median
-  filters), onset function = rise of the harmonic part in the vocal band, each word assigned to one onset
-  near its recognised time, in order (dynamic programming, 16th grid as fallback). `cue_onsets.py` lists
-  the plain onsets for hand overrides. Output `lyric_cues.json`, loaded into `T.TEXT`.
-- **One word per cue.** A word of one or two letters rides with the next if it follows within 0.45 beat;
-  words under 0.3 beat apart share a cue; no word shows more than 0.45 beat before it is sung. Cues start
-  0.04 beat early, the whole word is there within 3 frames, and it leaves when the next one arrives (at
-  most 1.1 beats).
-- **Centre.** Each word on the exact middle of the frame: horizontally the visible ink (measured on the
-  letter masks, not the advance widths), vertically the cap height on H/2 (`cy=0.5`). The reference sits
-  slightly higher; the user wants the middle.
-- **Translucent.** Blend on display values: overlay share 0.62 (0.50 for the red style) plus flat colour,
-  at strength 0.62-0.80, small glow. Drawn before the blur-in, so a whip blurs the word with the footage.
-  `duck()` dims it by 35 % while a shot fires. `$PY text_test.py` shows the first cue of each style present
-  in `T.TEXT` on a flat background.
+Measured on a 124 BPM band track (46 words over 31 s): the cues came out within a median 4.6 ms (0.01 beat) of the
+cues the user had accepted after hand checks, 36 of 44 within one frame, the worst 157 ms; the whole flow takes about
+50 s on a desktop CPU (demucs 22-26 s, both alignments 21 s).
+
+- **Right words only.** Speech recognition (faster-whisper large-v3, `transcribe.py`, its own venv) is for reading
+  the words only: it gets about half of a trap verse wrong. Confirm each line against a lyrics page with yes/no
+  questions through WebFetch (`letras.com.br`, `vagalume.com.br`; it will not quote lyrics, it does confirm
+  phrases). Unconfirmed lines get no text. If nothing can be confirmed: no lyric words at all; artist and title over
+  the intro are not recognised speech and may stay.
+- **A new project has no cues** until `lyrics_sync.py` writes `lyric_cues.json`; the intro words typed in the
+  timeline (`_T`) do show, until you replace them. `$PY timeline.py` ends with the number of cues and the first
+  words: read that line.
+- **Timing.** CTC forced alignment of the confirmed words on a demucs vocal stem (two models, mean, each start refined
+  on the stem: after a silence the first level rise, otherwise the nearest rise within -0.12..+0.05 s), checked on the
+  sync sheet. A word that would be on screen under 0.22 beat rides with the next; each word stays while it is sung:
+  until the next word, or until the voice stops when a silence follows (at most `WORD_HOLD_MAX`, 4 beats, in the
+  timeline). Cues start 0.04 beat early (`--adv`) and the whole word is there within 3 frames.
+- **Centre and size** (the user: "a letra sempre deve ficar no meio da tela centralizada e nao muito grande tampando
+  tudo, mas com um tamanho consideravel"). Each word on the exact middle of the frame: horizontally the visible ink
+  (measured on the letter masks, not the advance widths), vertically the cap height on H/2; measured within 1 px in
+  both frames. Caps 226 px for the red intro words and 202 px for the rest at 1080p (21 / 19 % of the frame height:
+  280 / 250 px were "muito grande"), and no word wider than 70 % of the frame width (`frame.WORD_CAP_RED`,
+  `WORD_CAP`, `WORD_MAXW`); a longer word or phrase is set smaller. A reference's bigger or off-centre words are not
+  copied.
+- **Translucent.** Blend on display values: overlay share 0.62 (0.50 for the red style) plus flat colour, at strength
+  0.62-0.80, a small glow and a soft shadow. Drawn before the blur-in, so a whip blurs the word with the footage.
+- **The enemy stays visible.** The crosshair is under the word: a word steps back (`duck` 0.35) from the shot until
+  the enemy's body is down (`duck_death`), at least 0.28 beat and at most 0.60 beat after the shot (`duck_max`);
+  a short word steps back less. `STYLE_OVERRIDES` in timeline.py changes a style (`strength`, `ov`, `cap` in 1080p px,
+  `duck`, `duck_after`, `duck_death`, `duck_max`, `shadow=(dx, dy, blur, strength)`, `maxw`); a misspelled style
+  name stops with a message. `$PY text_test.py` shows the first cue of each style on a flat background and prints the
+  cap, the share of height and width and the centre offset.
 - A lyric that names what is on screen is worth building around ("através da parede" on a wallbang,
   then the victim's replay).
 

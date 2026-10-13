@@ -328,27 +328,28 @@ KILLS = [(k, lv, i) for i, s in enumerate(SEGS) for k, lv in s["kills"]]
 PULSES = []
 
 # ---------------------------------------------------------------- lyric words on screen: (beat in, beat out, text, style)
-# only lines checked against the published lyrics; times are measured vocal onsets
-# one word (or one tight group) at a time, each placed on its measured vocal onset (lyrics_align.py -> lyric_cues.json);
+# only lines checked against the published lyrics; one word (or one tight group) at a time, each on its sung start
+# (lyrics_sync.py: CTC alignment of the confirmed words on the voice stem -> lyric_cues.json), staying while it is sung;
 # the user on an early version: "tentar sincronizar ao maximo as letras da tela"
 import json as _json
 # THESE WORDS BELONG TO THIS SONG. A new project: replace _T (artist and title over the intro, or nothing) and let
-# lyrics_align.py write a new lyric_cues.json. Until then a project shows only _T.
+# lyrics_sync.py write a new lyric_cues.json. Until then a project shows only _T.
 # >>> draft:words
 _T = [(-15.0, -12.0, "ARTIST", "red"), (-9.5, -6.5, "TITLE", "red"),
       (-4.0, -3.0, "YEAH", "red"), (-2.78, -2.1, "YEAH", "red"), (-1.97, -1.2, "YEAH", "red")]
 # <<< draft:words
 import os as _os
-if _os.path.exists("lyric_cues.json"):          # written by lyrics_align.py (which imports this file: hence the test)
+if _os.path.exists("lyric_cues.json"):          # written by lyrics_sync.py (which imports this file: hence the test)
     _T += [tuple(c) for c in _json.load(open("lyric_cues.json", encoding="utf-8"))]
+WORD_HOLD_MAX = 4.0                             # beats a sung word may stay (a long held note); lyrics_sync.py ends each cue
+                                                # when the next word starts or the voice stops
 TEXT = []
 for _j, (_a0, _b0, _w, _st) in enumerate(_T):
     if _b0 is None:                                   # stays until shortly before the next word, so they never overlap
         _gap = _T[_j + 1][0] - _a0
         _b0 = _T[_j + 1][0] - (0.30 if _gap >= 0.9 else 0.15)
-    if _a0 > -1.5:                                    # a lyric word never sits on screen longer than 1.1 beats (-1.5: where this
-                                                      # song's intro words end; they may stay longer)
-        _b0 = min(_b0, _a0 + 1.1)
+    if _a0 > -1.5:                                    # -1.5: where this song's intro words end; they may stay longer
+        _b0 = min(_b0, _a0 + WORD_HOLD_MAX)
     TEXT.append((_a0, _b0, _w, _st))
 
 

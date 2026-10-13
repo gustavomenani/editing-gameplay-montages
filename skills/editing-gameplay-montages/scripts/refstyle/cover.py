@@ -13,7 +13,7 @@ W, H, G = frame.W, frame.H, 2.2
 
 def cue(word, style, **over):
     c = textfx.Cue.__new__(textfx.Cue)
-    c.a, c.b, c.word, c.st, c.fade, c.n_in = 0.0, 1.0, word, dict(textfx.STYLES[style], **over), 0.3, 0
+    c.a, c.b, c.word, c.st, c.fade, c.n_in = 0.0, 1.0, word, dict(textfx.STYLES[style], maxw=W, **over), 0.3, 0      # the cover sets its own size (below), not the video's 70 % limit
     c.appear = {i: -10 for i, ch in enumerate(word) if ch != " "}
     c.n_settled, c.n_end, c.built = 0, 10 ** 9, False
     c.build()

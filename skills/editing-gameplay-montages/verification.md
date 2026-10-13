@@ -71,9 +71,9 @@ spreads it into a small unevenness), so do not rely on `check.py` alone: `check_
 
 | Check | Passes when |
 |---|---|
-| crop of a still beside the same crop of the reference: `ffmpeg -ss T -i ref.mp4 -frames:v 1 -vf crop=1500:560:210:230 a.jpg`, the same crop of `render.py N N+1 still.jpg`, joined with `hstack` | letters as see-through and as large as in the reference; placement follows the user's rule (exact centre). Stills lack the encoder's `unsharp`, so do not judge crispness here |
-| text centre: guide lines on a still, or `cue.ink` in `textfx.py` | ink centre 960 +/- 0.5 px, caps centred on y = 540, for every cue |
-| `lyrics_align.py` table | every word within about 100 ms of its recognised time; overrides explained; unconfirmed lines absent |
+| crop of a still beside the same crop of the reference: `ffmpeg -ss T -i ref.mp4 -frames:v 1 -vf crop=1500:560:210:230 a.jpg`, the same crop of `render.py N N+1 still.jpg`, joined with `hstack` | letters as see-through as in the reference; size and placement follow the user's rule, not the reference (exact centre; caps 226 / 202 px at 1080p, widest word 70 % of the width). Stills lack the encoder's `unsharp`, so do not judge crispness here |
+| `$PY text_test.py` and `$PY text_test.py vertical` (cap px, share of height and width, ink centre offset per style and for the widest word) | ink centre within 2 px of the frame centre (horizontal 960 / 540, vertical 540 / 960) for every cue; no word wider than 70 % of the width |
+| `lyrics_sync.py` table + `lyrics/sync_*.jpg` | every red line on its syllable's left edge; no CHECK word left unexplained; the two models within 0.35 s on every word; unconfirmed lines absent |
 | `posmap.py` | prints a measured position table per kind of grid, or says it uses the reference table for a kind the store does not contain; after `fixends.py` nearly every dense interval counts as fixed |
 | `check.py` on the reference-style master | no stall at a whole source position inside slow motion |
 

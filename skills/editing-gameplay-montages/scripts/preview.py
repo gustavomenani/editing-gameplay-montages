@@ -45,13 +45,13 @@ if REF:
     WIN = (0, frame.WIN_Y, frame.WIN_W, frame.WIN_H, frame.WIN_R) if VERT else (0, 0, W, H, 0)
     STRIP = (656 / 1920, 1264 / 1920)                  # centre 9:16 strip of the footage that the backdrop is made of (render.py)
     CROP = None                                        # the whole 16:9 source frame
-    MAXW, CAP_K = frame.WORD_MAXW, frame.CAP_K
+    MAXW, CAP_K, CAPS = frame.WORD_MAXW, frame.CAP_K, (frame.WORD_CAP_RED, frame.WORD_CAP)
 else:
     W, H, VERT = 1080, 1920, True
     WIN = (0, 470, 1080, 912, 34)                      # render.py FG_Y, FG_H, rounded corners
     STRIP = (0.2625, 0.7375)                           # render.py: source x 656..1264 of the 320..1600 the window shows
     CROP = "crop=iw*2/3:ih:iw/6:0"                     # the window shows 1280 of the 1920 source px (render.py WIN_SRC_W)
-    MAXW, CAP_K = 940, 0.62
+    MAXW, CAP_K, CAPS = 756, 0.60, (226, 202)               # refstyle/frame.py's vertical values (the house style shows no words)
 
 S = args.scale
 CW, CH = int(round(W * S / 2)) * 2, int(round(H * S / 2)) * 2
@@ -188,7 +188,7 @@ class Words:
     def image(self, j):
         if j not in self.cache:
             _, _, word, st = self.cues[j]
-            cap = (280 if st == "red" else 250) * CAP_K * S
+            cap = (CAPS[0] if st == "red" else CAPS[1]) * CAP_K * S
             size = cap / 0.79                                      # Impact: capital height = 0.79 of the font size
             while True:
                 font = self.Font.truetype(self.font_file, max(8, int(round(size)))) if self.font_file else self.Font.load_default()

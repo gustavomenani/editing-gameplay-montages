@@ -32,7 +32,7 @@ Prefer a late section (last chorus plus outro): it ends on a natural last word, 
 | the drop | that kill fires exactly on it: level 3 (inverted frame, biggest burst), a boom | |
 | the full band after the drop | one kill per take, about one per second, every kill on a measured kick or snare; the first kills after the drop come fastest (1 to 1.5 beats) | `cuts_on: "kills"` |
 | the strongest snare of the section | a level-3 kill, a boom | levels |
-| the drums thin out (a bar with weak kick and snare) | a second bullet time: 2 to 3 beats of slow lead-in with a white flash-in and a riser into the next strong hit, a boom | the drafter finds it by itself (`auto_bullet`, on by default): 1.5 beats or more of drums under 25 % of a typical hit after a louder passage, then a strong hit within 2 beats; at most one per 30 s. Your own `"bullet": "hit"` on a kill, or `"auto_bullet": false`, overrides it |
+| the drums thin out (a bar with weak kick and snare) | a second bullet time: 2 to 3 beats of slow lead-in with a white flash-in and a riser into the next strong hit, a boom | the drafter finds it by itself (`auto_bullet`, on by default): 1.5 beats or more of drums under 35 % of a typical hit after a louder passage, then a strong hit within 2 beats; at most one per 30 s, never in the last two bars (the ace's). Your own `"bullet": "hit"` on a kill, or `"auto_bullet": false`, overrides it |
 | the last vocal line | the best multi-kill (the ace) kill by kill, one kill every 1.5 to 2.5 beats, all from the same clip | plan order |
 | the last sung word | the final kill (level 3 but calm: no zoom, punch or shake), then slow motion at about 0.08x under the fade | the last kill of the plan, pinned with `"at"` on the beat of the last sung word |
 | strong hits that carry no kill | a light pulse and a 1.2 % nudge (a "bump") so the picture keeps moving with the drums | `BUMPS` (the drafter fills it from the measured hits) |
@@ -119,7 +119,7 @@ bloom 0.11 and a faint wide glow. `LOOK = "modelo"` reproduces it; the user's wo
 | very fast (above 150 BPM, drum and bass) | gaps of 2.5 to 3 beats; lead 12 frames; the mid bullet time on the breakdown |
 | slow (below 90 BPM) | gaps of 1 to 1.5 beats; loud hats may carry kills in dense bars |
 | half-time trap (808 on 1, snare on 3) | kills on 808s and snares (loud hats in dense bars); gaps by seconds (section 3) |
-| a live band mix (the bass on every half beat) | the measured low band is full everywhere and the snare shows in the high band only: give `level` 2 / 3 in the plan to the kills on the backbeat (beats 2 and 4 of the bar, beat 3 in half time) where `music_spec.py` shows the snare's crack |
+| a live band mix (the bass on every half beat) | nothing to do: the measure takes the kick from the onset of the low band (a held bass note does not count) and the snare from body and crack arriving together, within +-50 ms of the half beat (a drummer drifts), so `music_pulses.py` lists the backbeat snares and the drafter gives them level 2 (measured: 12 of 12 backbeat snares found); give `level` in the plan only to override |
 | drums everywhere equally strong | fewer bumps: about one every 2 s, on the strongest hits only |
 | no bar where the drums thin out | no mid bullet time |
 | fewer kills than the section needs | a shorter section, not slower takes; never repeat a play |

@@ -1,0 +1,11 @@
+# The separation venv of the lyric words (lyrics_stem.py: demucs; lyrics_ctc_align.py: torchaudio CTC models). Not venv311.
+# Python 3.11, CPU torch (no GPU needed). Run in the project folder:
+#   uv venv --python 3.11 venv_sep
+#   uv pip install --python venv_sep/Scripts/python.exe -r requirements_sep.txt
+# Disk: about 0.6 GB with the packages (CPU torch), plus 1.2 GB per alignment model (torch hub cache) on first use.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchaudio==2.11.0+cpu
+demucs==4.1.0
+soundfile==0.14.0
+numpy==2.4.6

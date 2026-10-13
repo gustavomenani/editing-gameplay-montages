@@ -112,17 +112,18 @@ INTRO_H = 6                     # real-time frames after an intro kill's shot
 SHUTTER = (2.6, 2.4, 2.2)
 UPTO_DEFAULT = 24       # frames from the shot until the body is down, when the plan does not say (the model measured 21 to 28)
 STRONG = 0.9            # a hit this strong (0..1) may carry a "hit" bullet and is preferred for kills
-SN2 = 0.9               # unclipped snare / clap strength from which a kill is a backbeat snare (level 2)
-LV2_SHARE = 0.25        # at most this share of the takes at level 2 (the model: 5 of 21): on a song with loud hats on every half beat
-                        # nearly every kill clears SN2, and level 2 everywhere is no accent; the strongest snares keep it
-BUMP_MIN, BUMP_PER_S, BUMP_GAP = 1.5, 0.42, 1.0     # unclipped strength floor, bumps per second at most (13 in 31 s), beats between two bumps
-THIN_WEAK = 0.25       # a half beat whose drum hit is under this share of the section's typical hit (the median hit) is weak
+SN2 = 0.9               # unclipped snare / clap strength (beat_hits' mid: body and crack both arriving) from which a kill is a backbeat snare (level 2)
+LV2_SHARE = 0.25        # at most this share of the takes at level 2 (the model: 5 of 21): level 2 everywhere is no accent; the strongest snares keep it
+BUMP_MIN, BUMP_PER_S, BUMP_GAP = 0.7, 0.42, 1.0     # unclipped strength floor (beat_hits' scale: a kick is 0.5 at its weakest, 1.5 at its strongest), bumps per second at most (13 in 31 s), beats between two bumps
+THIN_WEAK = 0.35       # a half beat whose drum hit is under this share of the section's typical hit (the median hit) is weak (ghost notes
+                       # of a live drummer read 0.29-0.34 on beat_hits' onset measure)
 THIN_MIN = 3           # weak half beats in a row that make a thin-out (1.5 beats)
 THIN_REL = 0.5         # ... at no more than this share of the section's mean level
 THIN_FALL = 0.3        # ... after a passage at least this much louder (0..1 of a typical hit, the 2 beats before)
 THIN_NEXT = 2.0        # beats after the thin-out within which a strong hit must come to land the bullet-time kill on
 THIN_PER_S = 30.0      # at most one automatic bullet time per this many seconds of video
-AUTO_ROOM = 1.5        # beats a strong hit must lie before the last take's kill to carry an automatic bullet time
+AUTO_ROOM = 8.0        # beats a strong hit must lie before the last take's kill to carry an automatic bullet time: the last two bars
+                       # belong to the ending (the model: the ace kill by kill over the last line), a bullet time there breaks its rhythm
 AUTO_SHIFT = 3.0       # beats the drafted kill may lie after that strong hit (it is moved onto it)
 AUTO_TRIES = 4         # drafts tried with a bullet time before the plain draft is kept
 KEYS = {"music", "bpm", "beat0", "drop_beat", "start_beat", "cuts_on", "lead_frames", "frame", "max_speed", "length", "length_tolerance", "look",
@@ -424,9 +425,9 @@ class Hits:
         return max(self.low.get(u, 0), self.mid.get(u, 0), self.high.get(u, 0))
 
     def snare(self, u):
-        """unclipped snare / clap strength of a hit that is not a kick (0 on a kick)"""
+        """unclipped snare / clap strength (beat_hits' mid) of a hit that is not a kick (0 on a kick); a hat has none"""
         lo, mi, hi = self.raw.get(u, (0.0, 0.0, 0.0))
-        return 0.0 if self.low.get(u, 0) >= KICK else max(mi, hi)
+        return 0.0 if self.low.get(u, 0) >= KICK else mi
 
     def describe(self, u):
         lo, mi, hi = self.low.get(u, 0), self.mid.get(u, 0), self.high.get(u, 0)
@@ -1045,6 +1046,11 @@ def assign_levels(takes, H, ib, n):
     fixed2 = sum(1 for j, tk in enumerate(takes) if tk.level is None and j != best and (tk.lkind == "hit" or (j in after and tk.lkind != "drop" and j != n - 1)))
     room = max(0, int(round(LV2_SHARE * n)) - fixed2)       # backbeat snares that may still get level 2, the strongest first
     snares2 = set(sorted((j for j, v in snare.items() if v >= SN2 and j != best and j not in after), key=lambda j: -snare[j])[:room])
+    if len(snares2) < room:                                 # few kills on real snares / claps (a trap beat whose kills sit on 808s and
+        def _hit(j):                                        # hats): the strongest other hits fill the share, so the accents keep the model's
+            return H.score(int(round(takes[j].last * 2)))   # proportion instead of falling to 3 of 24
+        rest = sorted((j for j in snare if j not in snares2 and j != best and j not in after and _hit(j) >= STRONG), key=lambda j: -_hit(j))
+        snares2 |= set(rest[:room - len(snares2)])
     for j, tk in enumerate(takes):
         tk.first_after_drop = j in after
         lv = tk.level

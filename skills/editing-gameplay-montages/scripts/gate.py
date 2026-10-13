@@ -364,7 +364,7 @@ def check_lyrics(T):
         return []
     return [item("ERROR", "lyrics-word", "beats " + ", ".join("%g" % b for b, _ in bad[:8]),
                  "word(s) on screen that are not in lyrics.txt: %s" % ", ".join(sorted({w for _, w in bad})),
-                 "fix lyrics.txt (the confirmed lyrics), then lyrics_lines.py and lyrics_align.py; or --accept lyrics-word if the text is intended")]
+                 "fix lyrics.txt (the confirmed lyrics), then run lyrics_sync.py; or --accept lyrics-word if the text is intended")]
 
 
 # ---------------------------------------------------------------------------------------------------------------- the gate

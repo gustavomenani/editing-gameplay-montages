@@ -40,7 +40,8 @@ import frame
 T = None                                        # the timeline module: analyze() / alignment() set it (main loads it with preflight.timeline())
 Wd, Hd = 270, 228
 TW, TH = (180, 320) if frame.VERT else (320, 180)          # overview tile
-# two bands of footage, above and below the lyric words (crop = w:h:x:y). Vertical: inside the 1080x608 window, clear of the 940 px words
+# two bands of footage, above and below the lyric words (crop = w:h:x:y). Vertical: inside the 1080x608 window, clear of the words
+# (caps 121-135 px centred on y = 960)
 BANDS = ("1000:170:40:664", "1000:170:40:1090") if frame.VERT else ("1020:250:460:80", "1020:250:300:660")
 PRE_N = 6                                      # kill sync (alignment): frames measured before the shot ...
 PRE_CLEAR = PRE_N + 6                          # ... when the take started at least this many frames before it (5-frame blur-in + 1 clear)

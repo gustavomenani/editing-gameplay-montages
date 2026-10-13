@@ -21,7 +21,7 @@ Não usa editor de vídeo. O Claude escreve a edição num arquivo Python (`time
 | [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) | `winget install Gyan.FFmpeg` |
 | [uv](https://docs.astral.sh/uv/) | Cria o Python 3.11 do projeto: `winget install astral-sh.uv` |
 | Gravações de qualquer resolução, taxa e formato | 1080p, 1440p, 4K, 4:3 esticado, ultrawide; de 30 a 240 fps; H.264, HEVC, AV1; .mp4, .mkv, .mov, .ts; OBS com várias faixas de áudio (usa a faixa 1); HDR (convertido para SDR) (ShadowPlay, Outplayed, OBS, Medal). O ideal é 60 fps ou mais: a 30 fps metade dos frames tem que ser inventada. Clipe vertical de celular entra com barras pretas dos lados. Pode ser clipe curto ou gravação crua de alguns minutos |
-| Espaço em disco | De 7 a 13 GB por vídeo para os frames interpolados (dá para apagar depois). Some o tamanho das cópias convertidas quando os clipes não são 1920x1080 a 60 fps, ou estão em outro disco (aí eles são copiados, não linkados) |
+| Espaço em disco | De 7 a 13 GB por vídeo para os frames interpolados (dá para apagar depois). Some o tamanho das cópias convertidas quando os clipes não são 1920x1080 a 60 fps, ou estão em outro disco (aí eles são copiados, não linkados). Letra na tela: mais uns 3 GB uma vez só (o ambiente que separa a voz e os dois modelos de alinhamento) |
 
 ## Instalar
 
@@ -119,7 +119,7 @@ O melhor edit já feito com a skill (o que o autor considera o mais bem sincroni
 | Acentos | Por nível de kill: explosão radial, RGB split, raios de luz, um frame invertido nas kills grandes (drop, a caixa mais forte, o ace); pulsos de luz nos ataques da bateria entre as kills |
 | Som | Tiro de cada kill no beat, sub grave sob cada kill, swish nos cortes, booms nas kills grandes, risers antes do drop |
 | Cor | Saturada, com vinheta visível (`LOOK = "modelo"`) |
-| Texto | Opcional: palavra por palavra da letra, translúcida, no centro exato |
+| Texto | Opcional: palavra por palavra da letra, cada uma no instante em que é cantada (alinhada na voz isolada da música), translúcida, sempre no centro exato da tela, num tamanho que se lê de relance sem tampar o jogo |
 | Extra | Capa com o título, vertical ou horizontal |
 
 O antigo estilo "house" (janela que mostra só 2/3 da largura do jogo, transições que movem os dois clipes, fundo que pulsa) continua disponível se você pedir "estilo janela" ou "estilo house", mas deixou de ser o padrão.
@@ -164,7 +164,7 @@ skills/editing-gameplay-montages/
 - No vertical, o jogo inteiro ocupa uma faixa no meio da tela (cerca de 1/3 da altura), com o fundo desfocado em volta. Uma referência vertical que corta o jogo para encher a tela não é copiada nesse ponto, porque o corte vira um zoom que borra o jogo e esconde minimapa e kill feed. O estilo padrão vertical foi validado num edit completo de 32 s (16 kills, nenhum frame repetido ou travado).
 - Os comandos de shell são de Windows (Git Bash e PowerShell).
 - O Claude mede tudo, mas não assiste. Sensação, intensidade e mixagem quem julga é você.
-- A letra na tela só usa linhas que você colou ou que foram confirmadas numa página de letras, porque o reconhecimento de voz erra metade de um verso de trap. Com a letra em mãos, a skill casa cada palavra com a voz sozinha.
+- A letra na tela só usa linhas que você colou ou que foram confirmadas numa página de letras, porque o reconhecimento de voz erra metade de um verso de trap. Com a letra em mãos, a skill separa a voz da música e alinha cada palavra nela com dois modelos (medido: mediana de 5 ms de diferença para a sincronia aprovada à mão), e mostra uma folha para conferir antes do render.
 - O TikTok pode converter uploads de 60 fps para 30 fps se a opção de alta qualidade estiver desligada (não confirmado oficialmente).
 
 ## Contribuir
