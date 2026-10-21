@@ -1,6 +1,9 @@
 """Draw the music as a spectrogram labelled in TIMELINE beats, with the onsets of three drum bands
-underneath (red = kick / bass below 150 Hz, green = snare body, blue = hats above 6 kHz).
-Read it to see, beat by beat, what hits where: the kills go on the tall red or green bars.
+underneath (red = kick / bass below 150 Hz, green = snare body, blue = hats above 6 kHz) and, under each strip, a triangle
+at every MEASURED ATTACK of that band (beat_hits.attacks: the one definition of a hit's time, in the band's own colour).
+Read it to see, beat by beat, what hits where: the kills go on the tall red or green bars, ON their triangle. The bars are
+the flux of 3 STFT frames (17 ms) drawn at the centre of the later 46 ms window: a reading aid good to about +-6 ms (drawn
+0 to 6 ms before the real attack); the triangles are the measurement (+-2.5 ms on drums), in the same time axis.
 
 usage: python music_spec.py [r0 r1]      beats to draw; default: the video plus 8 beats on each side
 -> spec_0.png, spec_1.png, ...  (two rows of 26 beats per picture, white line every 4 beats)
@@ -12,6 +15,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import timeline as T
 from ff import FF
+import beat_hits
+import preflight
+if getattr(T, "SYNC", 0) < preflight.SYNC_NEEDED:
+    sys.exit("music_spec.py: " + preflight.sync_update_message(getattr(T, "SYNC", 0)))
 
 SR, N, H = 44100, 2048, 256
 raw = subprocess.run([FF, "-v", "error", "-i", T.MUSIC, "-map", "0:a:0", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"],
@@ -64,6 +71,12 @@ def row(r0, r1, width=2000, sh=300):
                 if hgt > 2:
                     d.line((c, y0 + 44, c, y0 + 44 - hgt), fill=col)
             d.text((2, y0), name, fill=col, font=font)
+            # the measured attacks of the band (beat_hits.attacks: the ONE definition, accurate to ~2.5 ms on drums): a triangle under
+            # the strip at the attack's time. The bars above are a reading aid (3-frame flux drawn at the window centre: 0 to 6 ms early
+            # of the real attack, and one pixel is ~6 ms here); the triangles are the measurement
+            for ta_, _b, rise in (e for e in ATT if e[1] == ("low", "mid", "high")[bi] and t0 - 0.05 <= e[0] <= t1 + 0.05):
+                xx = int(round((ta_ - t0) / (t1 - t0) * width))
+                d.polygon([(xx - 3, y0 + 49), (xx + 3, y0 + 49), (xx, y0 + 42)], fill=col, outline=(255, 255, 255))
     for r in np.arange(np.ceil(r0 * 2) / 2, r1, 0.5):
         xx = int((r - r0) / (r1 - r0) * width)
         if abs(r - round(r)) < 1e-6:
@@ -88,6 +101,8 @@ if r1 < beat_first or r0 > beat_last:
     raise SystemExit("beats %g .. %g are outside the music (it covers timeline beats %g .. %g with this BPM / BEAT0 / M0)" % (
         r0, r1, beat_first, beat_last))
 starts = np.arange(r0, r1, 26)
+ta0 = max(0.0, T.beat_time(r0) - 1.0)
+ATT = beat_hits.strong_attacks(beat_hits.attacks(x[int(ta0 * SR):int((T.beat_time(float(starts[-1]) + 26) + 1.0) * SR)], ta0))       # the sharp attacks of the drawn stretch (t, band, rise)
 for old in glob.glob("spec_*.png"):                                        # pictures of an earlier, longer run would mislead
     os.remove(old)
 for i in range(0, len(starts), 2):

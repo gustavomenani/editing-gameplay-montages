@@ -1,5 +1,5 @@
 """Lyric words on screen, in the style of the reference: heavy condensed caps (Impact), letters popping in in
-random order (one every 1-2 frames, white flash + colour split on the pop), metallic gradient fill, soft
+random order (white flash + colour split on the pop), metallic gradient fill, soft
 glow, held while the word is sung, then a quick fade. Composited in linear light, before the transition
 blur, so a whip blurs the word together with the footage.
 
@@ -12,6 +12,10 @@ of the width, were "muito grande". Vertical frame (timeline FRAME = "vertical", 
 Ducking: the crosshair, i.e. the enemy, is on the same centre. A word steps back while a kill plays and stays back until the body
 is down (`duck_death`, at most `duck_max` beats after the shot; DEATH source frames after the shot, 22 by default: deathstrip.py
 measures 18-28), lighter for a short word, which covers less of the enemy.
+
+Timing (T.TEXT starts are the sung attacks, musical beats): the first letter appears on T.nearest_frame(start) - T.HIT_LEAD, the picture
+leading its sound like a shot's flash does, and every letter is on by T.nearest_frame(start): the whole word is legible on that frame (the
+letters share the HIT_LEAD frames in a fixed random order). The kill duck keeps reading T.KILLS (the beats the shots are shown on).
 
 Per-project changes of a style: STYLE_OVERRIDES = {"gold": dict(strength=0.76, ...)} in timeline.py (absent = the defaults here; keys
 of a style below, `cap` in horizontal px: it is scaled by CAP_K in the vertical frame).
@@ -74,7 +78,11 @@ CAPR = (_b[3] - _b[1]) / 400.0
 
 
 def frame_of(beat):
-    return int(round((beat - T.R0) * T.FPB))
+    """The output frame nearest to a musical beat (the timeline's own rule)."""
+    return T.nearest_frame(beat)
+
+
+HIT_LEAD = int(T.HIT_LEAD)
 
 
 DEATH = 22          # source frames after the shot in which the enemy falls (deathstrip.py: 18-28 on these clips)
@@ -120,14 +128,15 @@ class Cue:
         st = self.st = STYLES[style]
         nxt = T.TEXT[j + 1][0] if j + 1 < len(T.TEXT) else 1e9
         self.fade = min(0.36, max(0.08, nxt - self.b - 0.02))      # gone before the next word pops in
-        self.n_in = frame_of(self.a)
+        self.n_word = frame_of(self.a)                  # the frame the whole word is legible on: the sung attack's nearest frame
+        self.n_in = self.n_word - HIT_LEAD              # the first letter: HIT_LEAD frames before, like a shot's flash before its hit
         self.built = False
         rng = np.random.default_rng(1000 + j)
         letters = [i for i, ch in enumerate(self.word) if ch != " "]
         order = rng.permutation(len(letters))
-        step = min(1.0, 3.0 / max(1, len(letters)))      # the whole word is there within 3 frames of its onset
+        step = HIT_LEAD / float(max(1, len(letters) - 1))      # letters spread over the HIT_LEAD frames: every letter is on by n_word, one on n_in
         self.appear = {letters[q]: self.n_in + int(round(order[q] * step)) for q in range(len(letters))}
-        self.n_settled = self.n_in + int(round((len(letters) - 1) * step)) + 3
+        self.n_settled = self.n_word + 3                       # the last letter's colour flash (ages 0..2) is over
         self.n_end = frame_of(self.b + self.fade) + 1
 
     def build(self):

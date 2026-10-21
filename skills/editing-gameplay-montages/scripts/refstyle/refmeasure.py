@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -29,8 +30,8 @@ cv2.setNumThreads(1)                                 # the frame loops are small
 
 # ------------------------------------------------------------------------------------------------ input
 def probe(path):
-    """-> dict(width, height, fps, duration, frames, has_audio, audio_duration). width / height are what a player shows
-    (a rotated phone clip is swapped)."""
+    """-> dict(width, height, fps, duration, frames, has_audio, audio_duration, av_offset_s). width / height are what a player shows
+    (a rotated phone clip is swapped); av_offset_s = start of the sound minus start of the picture (0.0 when there is no sound)."""
     r = subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-show_format", "-of", "json", path], capture_output=True)
     if r.returncode != 0:
         raise SystemExit("ffprobe cannot read %s: %s" % (path, r.stderr.decode(errors="replace").strip()[-300:]))
@@ -61,12 +62,45 @@ def probe(path):
     fps = frac(v.get("avg_frame_rate", "")) or frac(v.get("r_frame_rate", "")) or 30.0
     dur = float(v.get("duration") or j.get("format", {}).get("duration") or 0)
     nb = int(v["nb_frames"]) if str(v.get("nb_frames", "")).isdigit() else int(round(dur * fps))
+
+    def start(s):
+        try:
+            return float(s.get("start_time", 0) or 0)
+        except ValueError:
+            return 0.0
     return dict(width=W, height=H, fps=fps, duration=dur, frames=nb, has_audio=bool(a),
-                audio_duration=float(a[0].get("duration", 0) or 0) if a else 0.0)
+                audio_duration=float(a[0].get("duration", 0) or 0) if a else 0.0,
+                av_offset_s=(start(a[0]) - start(v)) if a else 0.0)       # where the sound starts against the picture (0.000 in every reference seen)
+
+
+def _ffmpeg_frames(cmd, size, on_frame):
+    """Run an ffmpeg rawvideo command and hand every complete frame (bytes of `size`) to on_frame.
+    stderr goes to a temp FILE, never to a pipe that nobody reads while stdout is being drained: ffmpeg blocks on a full 64 KB stderr
+    pipe, and a reference that makes it print errors (a funk reference: 4.9 MB of "missing picture in access unit") hung
+    this analysis for ever. `-err_detect ignore_err` keeps decoding past damaged packets. A decoder that exits
+    early (damaged file, -frames reached) simply ends the loop: the frames read so far are kept. -> the tail of stderr (for messages)."""
+    cmd = list(cmd)
+    cmd[cmd.index("-i"):cmd.index("-i")] = ["-err_detect", "ignore_err"]
+    with tempfile.TemporaryFile() as ef:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=ef)
+        try:
+            while True:
+                b = p.stdout.read(size)
+                if len(b) < size:
+                    break
+                on_frame(b)
+        finally:
+            p.stdout.close()
+            p.wait()
+        ef.seek(0, os.SEEK_END)
+        ef.seek(max(0, ef.tell() - 4000))
+        return ef.read().decode(errors="replace").strip()
 
 
 def decode(path, info, max_frames):
-    """Decode (at most max_frames frames) to small copies. -> G (n,h,w) uint8, C (n,ch,cw,3) uint8, native size (W, H)."""
+    """Decode (at most max_frames frames) to small copies. -> G (n,h,w) uint8, C (n,ch,cw,3) uint8, native size (W, H).
+    The frame index of the arrays is the frame index of the file at its constant frame rate (ffmpeg's rawvideo output is
+    constant-rate, so a damaged stretch repeats a frame instead of shifting every later frame)."""
     W, H = info["width"], info["height"]
     if W >= H:
         aw, ah = 320, int(round(320 * H / W / 2)) * 2
@@ -76,18 +110,13 @@ def decode(path, info, max_frames):
         ch, cw = 128, max(2, int(round(128 * W / H)))
     cmd = [FF, "-v", "error", "-i", path, "-an", "-frames:v", str(max_frames), "-vf", "scale=%d:%d:flags=area,format=rgb24" % (aw, ah),
            "-f", "rawvideo", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     G, C, size = [], [], aw * ah * 3
-    while True:
-        b = p.stdout.read(size)
-        if len(b) < size:
-            break
+
+    def on_frame(b):
         f = np.frombuffer(b, np.uint8).reshape(ah, aw, 3)
         G.append(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY))
         C.append(cv2.resize(f, (cw, ch), interpolation=cv2.INTER_AREA))
-    p.stdout.close()
-    err = p.stderr.read().decode(errors="replace").strip()
-    p.wait()
+    err = _ffmpeg_frames(cmd, size, on_frame)
     if len(G) < 30:
         raise SystemExit("decoded only %d frames from %s (%s)" % (len(G), path, err[-300:] or "too short to analyse"))
     return np.array(G), np.array(C), (W, H)
@@ -99,16 +128,8 @@ def sample_native(path, info, count, skip=0.0):
     W, H = info["width"], info["height"]
     step = max(dur / count, 0.5)
     cmd = [FF, "-v", "error", "-i", path, "-an", "-vf", "fps=1/%g,format=rgb24" % step, "-frames:v", str(count), "-f", "rawvideo", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, size = [], W * H * 3
-    while True:
-        b = p.stdout.read(size)
-        if len(b) < size:
-            break
-        out.append((step * (len(out) + 0.5), np.frombuffer(b, np.uint8).reshape(H, W, 3)))
-    p.stdout.close()
-    p.stderr.read()
-    p.wait()
+    out = []
+    _ffmpeg_frames(cmd, W * H * 3, lambda b: out.append((step * (len(out) + 0.5), np.frombuffer(b, np.uint8).reshape(H, W, 3))))
     return out
 
 
@@ -212,7 +233,12 @@ def _script(name):
 
 def beat_grid(audio_src, t0=0.0, t1=None):
     """The tempo and the beat grid of the sound of `audio_src` with music_tempo.py + music_grid.py (the project's own tools).
-    -> dict(bpm, beat0, members=[(bpm, strength, between share)], chosen, weak, text) or dict(error=...)."""
+    music_tempo.py prints no "best fit" when it finds NO TEMPO (a WEAK fit that is also not steady: -> dict(error=...), its stderr reason; a WEAK
+    but steady fit is used and `weak` is True); music_grid.py refuses a tempo that does not fit
+    ("N fits better": exit 1, a `run:  python music_grid.py N BEAT0` line) and this function then runs it again with N and that BEAT0 (a funk song:
+    95.7 -> 95.00); every WARNING line of both tools (tempo not steady, constant grid NOT adequate, beat phase wanders) goes to `notes`, and
+    `grid_adequate` is False for the first two: an edit built on such a reference must place on measured hits, not on the grid.
+    -> dict(bpm, beat0, members=[(bpm, strength, between share)], weak, notes, grid_adequate, grid_spread_ms) or dict(error=...)."""
     try:
         out, err = _run_script([_script("music_tempo.py"), audio_src])
     except subprocess.TimeoutExpired:
@@ -226,10 +252,17 @@ def beat_grid(audio_src, t0=0.0, t1=None):
     weak = bool(fs and float(fs.group(1)) < 2.5)
     dur = float(re.search(r"track ([\d.]+) s", out).group(1))
     t1 = min(t1 or dur, dur)
-    gout, gerr = _run_script([_script("music_grid.py"), "%.3f" % bpm, "%.4f" % first, "0", "%.2f" % t1, audio_src])
+    gargs = [_script("music_grid.py"), "%.3f" % bpm, "%.4f" % first, "0", "%.2f" % t1, audio_src]
+    gout, gerr = _run_script(gargs)
+    note = []
+    rf = re.search(r"^run:\s+python music_grid\.py ([\d.]+) (-?[\d.]+)", gout, re.M)
+    if rf and not re.search(r"=> ", gout):
+        note.append("music_grid.py refused %.3f BPM (%s): run again with %s BPM" % (bpm, (gerr.strip().splitlines() or ["does not fit"])[-1][:120], rf.group(1)))
+        bpm, first = float(rf.group(1)), float(rf.group(2))
+        gargs[1], gargs[2] = "%.3f" % bpm, "%.4f" % first
+        gout, gerr = _run_script(gargs)
     mb = re.search(r"=> BPM = ([\d.]+)\s+BEAT0 = (-?[\d.]+)", gout)
     mb0 = re.search(r"=> BEAT0 = (-?[\d.]+)", gout)
-    note = []
     if mb:
         bpm, first = float(mb.group(1)), float(mb.group(2))
         note.append("music_grid.py corrected the tempo to %.3f" % bpm)
@@ -238,14 +271,14 @@ def beat_grid(audio_src, t0=0.0, t1=None):
     else:
         note.append("music_grid.py could not refine the grid (%s): the provisional values are used" % ((gerr.strip().splitlines() or gout.strip().splitlines() or ["no output"])[-1][:160]))
     med = re.search(r"median ([+-][\d.]+) ms, spread \(std\) ([\d.]+) ms", gout)
-    shift = re.search(r"WARNING|warning:[^\n]*", gout)
-    if shift:
-        note.append(shift.group(0)[:200])
+    warns = [w_.strip()[:240] for w_ in re.findall(r"^(?:WARNING|warning:)[^\n]*", out + "\n" + gout, re.M)]
+    note.extend(warns)
+    adequate = not any(("constant grid NOT adequate" in w_) or ("tempo steady? NO" in w_) for w_ in warns)
     if weak:
-        note.append("fit strength below 2.5x: no clear drum pattern, do not trust the tempo")
+        note.append("a WEAK fit (strength under 2.5x), trusted because music_tempo.py's 30 s window and beat-phase steadiness checks agree")
     period = 60.0 / bpm
     first = first % period
-    return dict(bpm=round(bpm, 3), beat0=round(first, 4), members=members, weak=weak, notes=note,
+    return dict(bpm=round(bpm, 3), beat0=round(first, 4), members=members, weak=weak, notes=note, grid_adequate=adequate,
                 grid_spread_ms=float(med.group(2)) if med else None, track_seconds=dur)
 
 
@@ -291,6 +324,135 @@ def audio_pulses(src, bpm, beat0, step=0.5):
     return ts, out[:, 0], out[:, 1], out[:, 2]
 
 
+# ------------------------------------------------------------------------------------------------ drum attacks, same song, pops
+def _decode_mono(src, sr, t1=None):
+    cmd = [FF, "-v", "error", "-i", src, "-map", "0:a:0", "-ac", "1", "-ar", str(sr)] + (["-t", "%.3f" % t1] if t1 else []) + ["-f", "f32le", "-"]
+    return np.frombuffer(subprocess.run(cmd, capture_output=True).stdout, np.float32).astype(np.float64)
+
+
+def drum_attacks(src, t1=None, offset_s=0.0):
+    """Every attack in the sound of `src` (first `t1` s) in three bands: kick / bass (low), snare / clap / voice (mid), hat (high), by the
+    skill's ONE attack definition (beat_hits.attacks: the half-height of the band's linear envelope across its steepest 6 ms rise, minus the
+    class bias measured on synthetic truth), so a reference's hit and a drafted hit are the same kind of time.
+    -> list of dict(t, band, rise) sorted by t; t in seconds on the video clock (`offset_s` = where the sound starts against the picture),
+    `rise` = the steepest 6 ms rise of ln(envelope): the strength (callers take the strong ones, see STRONG_RISE)."""
+    import beat_hits as bh
+    x = _decode_mono(src, bh.SR, t1)
+    if len(x) < bh.SR:
+        return []
+    return [dict(t=float(t), band=b, rise=float(r)) for t, b, r in bh.attacks(x, offset_s)]
+
+
+def same_song(ref_src, song_src, sr=11025, hop=64):
+    """Is the reference's sound the user's song, and where?
+    1. onset envelopes (log RMS rise, 5.8 ms hop) of both sounds, cross-correlated: the 6 best peaks (0.5 s apart) are the candidate offsets
+       (a loop-based song repeats, so the best onset peak alone can be a wrong bar: a funk song 0.238 against 0.233).
+    2. for each candidate, every 2 s of the reference: normalised cross-correlation of the WAVEFORM against the song around the candidate
+       (+-0.25 s): 0.6-0.9 where the song is untouched, lower where the editor laid sounds over it. Windows at 0.3 or better vote; the
+       candidate with most votes wins; its offset is the median of its windows (0.1 ms resolution, parabolic peak); the song is the same when
+       30 % of the windows (at least 3) vote (a funk reference: 13 of 13; another song: 0 of 16).
+    -> dict(same, offset_s, ncc (median of the voting windows), score, second, windows_good, windows, offset_std_ms): the song's own time of
+    reference time t is t + offset_s."""
+    ref = _decode_mono(ref_src, sr)
+    song = _decode_mono(song_src, sr)
+    none = dict(same=False, offset_s=None, ncc=0.0, score=0.0, second=0.0, windows_good=0, windows=0, offset_std_ms=None)
+    if len(ref) < 8 * sr or len(song) < 8 * sr:
+        return none
+
+    def env(x):
+        n = len(x) // hop
+        e = np.log1p(100 * np.sqrt((x[:n * hop].reshape(n, hop) ** 2).mean(1)))
+        d = np.maximum(0, np.diff(e, prepend=e[0]))
+        d -= d.mean()
+        return d / (d.std() + 1e-9)
+    er, es = env(ref), env(song)
+    nf = 1 << int(math.ceil(math.log2(len(es) + len(er))))
+    c = np.fft.irfft(np.fft.rfft(es, nf) * np.conj(np.fft.rfft(er, nf)), nf)[:len(es)] / len(er)
+    k = int(np.argmax(c))
+    # loop-based songs repeat: take the best 6 peaks at least 0.5 s apart and let the waveform windows decide
+    order = np.argsort(c)[::-1]
+    cand = []
+    for i in order[:20000]:
+        if all(abs(int(i) - j) * hop / sr >= 0.5 for j in cand):
+            cand.append(int(i))
+        if len(cand) >= 6:
+            break
+    far = [float(c[j]) for j in cand if abs(j - k) * hop / sr >= 1.0]
+    second = max(far) if far else 0.0
+    none.update(score=round(float(c[k]), 3), second=round(second, 3))
+    W, pad = 2 * sr, int(0.25 * sr)
+
+    def vote(coarse):
+        offs, nccs, total = [], [], 0
+        for t0 in np.arange(0.5, len(ref) / sr - 2.5, 2.0):
+            a = int(t0 * sr)
+            seg = ref[a:a + W]
+            c0 = int(round((coarse + t0) * sr)) - pad
+            if c0 < 0 or c0 + W + 2 * pad > len(song):
+                continue
+            total += 1
+            region = song[c0:c0 + W + 2 * pad]
+            seg = seg - seg.mean()
+            nn = 1 << int(math.ceil(math.log2(len(region) + W)))
+            cc = np.fft.irfft(np.fft.rfft(region, nn) * np.conj(np.fft.rfft(seg, nn)), nn)[:len(region) - W + 1]
+            cs = np.concatenate([[0.0], np.cumsum(region * region)])
+            ncc = cc / np.sqrt(np.maximum(cs[W:] - cs[:len(cc)], 1e-12) * float(seg @ seg))
+            j = int(np.argmax(ncc))
+            if ncc[j] < 0.3:
+                continue
+            frac = 0.0
+            if 0 < j < len(ncc) - 1:
+                den = ncc[j - 1] - 2 * ncc[j] + ncc[j + 1]
+                frac = 0.5 * (ncc[j - 1] - ncc[j + 1]) / den if abs(den) > 1e-12 else 0.0
+            offs.append((c0 + j + frac) / sr - t0)
+            nccs.append(float(ncc[j]))
+        return offs, nccs, total
+    best = None
+    for j in cand:
+        offs, nccs, total = vote(j * hop / sr)
+        score = len(offs) * (float(np.median(nccs)) if nccs else 0.0)
+        if best is None or score > best[0]:
+            best = (score, offs, nccs, total, j)
+    _, offs, nccs, total, j = best
+    if len(offs) < max(3, 0.3 * total):
+        none.update(windows_good=len(offs), windows=total)
+        return none
+    return dict(same=True, offset_s=round(float(np.median(offs)), 5), ncc=round(float(np.median(nccs)), 3), score=round(float(c[j]), 3), second=round(second, 3),
+                windows_good=len(offs), windows=total, offset_std_ms=round(float(np.std(offs)) * 1000.0, 2))
+
+
+def find_pops(G, cut_frames, ratio=1.12):
+    """Sudden brightness jumps that are not part of a cut: a flash, an impact frame, a kill pop. A frame whose mean luma is >= `ratio` times the
+    one before (>= 3 gray levels more, the one before above 5), not between 1 frame before and 3 frames after a cut (a white flash-in or the
+    first frame of a blur-in belongs to its cut), the first of a run (jumps 1-2 frames apart count once). -> list of frame indexes."""
+    n = len(G)
+    m = G.reshape(n, -1).mean(1)
+    cs = np.array(sorted(cut_frames)) if len(cut_frames) else np.array([-99])
+    pops = []
+    for j in range(1, n):
+        if m[j - 1] > 5 and m[j] >= ratio * m[j - 1] and m[j] - m[j - 1] >= 3:
+            if np.any((j >= cs - 1) & (j <= cs + 3)):
+                continue
+            if pops and j - pops[-1] < 3:
+                continue
+            pops.append(j)
+    return pops
+
+
+def find_cut_flashes(G, cut_frames, ratio=1.12):
+    """The white / bright flash frame of cuts that have one (a flash-in or an impact frame at the cut): the first frame from 1 before to 3 after
+    the cut whose mean luma is >= `ratio` times the frame before (>= 3 levels more). -> list of (cut_frame, flash_frame)."""
+    n = len(G)
+    m = G.reshape(n, -1).mean(1)
+    out = []
+    for c in cut_frames:
+        for j in range(max(1, c - 1), min(n, c + 4)):
+            if m[j - 1] > 5 and m[j] >= ratio * m[j - 1] and m[j] - m[j - 1] >= 3:
+                out.append((int(c), int(j)))
+                break
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ cuts
 def _roi_gray(G, roi, width):
     x0, y0, x1, y1 = roi
@@ -323,25 +485,54 @@ def frame_pair_features(G, C, roi):
     return L, R, T, S
 
 
-def detect_cuts(L, R, min_gap=4):
-    """Hard cuts: a jump of the layout distance that is a local maximum and starts a run of unrelated frames.
-    Validated on the worked example (57 of 57 cuts found, 5 extra). -> list of dict(frame, L, R, strength)."""
+def _unit_thumbs(S):
+    """48x27 (or 27x48) gray thumbnails of the roi frames, mean removed, unit length: a dot product of two rows is their correlation."""
+    n = len(S)
+    wh = (48, 27) if S.shape[2] >= S.shape[1] else (27, 48)
+    th = np.array([cv2.resize(s.astype(np.float32), wh, interpolation=cv2.INTER_AREA) for s in S]).reshape(n, -1)
+    th -= th.mean(1, keepdims=True)
+    return th / (np.linalg.norm(th, axis=1, keepdims=True) + 1e-6)
+
+
+def detect_cuts(L, R, S, min_gap=2):
+    """Cuts: the FIRST frame i of a change of picture, found on a mean-removed correlation of 48x27 gray thumbnails (c(a, b)):
+      change     c(i-1, i) < 0.5, or a big colour-layout jump (L[i] >= 24) with a poor phase correlation (R[i] < 0.5): two shots of one
+                 scene (the same wall, a slightly turned camera) correlate at 0.51 and are still a cut (two frames of a test reference)
+      unrelated  the new picture stays unlike frame i-1 for 5 frames (c(i-1, i+k) < 0.55 for k = 0..4, < 0.7 for 5 and 6): a blur-in
+                 that passes through, a flash that comes back, a one-frame glitch or a burst effect is no cut
+      calm       the frames before are one picture (c(i-3, i-1) > 0.2, or L[i-1] < 8, or R[i-1] > 0.7): not the middle of a transition
+    The cut is the first frame of the change, not the local maximum of L; no neighbour-ratio rule (a blur-in keeps L high for 2-3 frames, so
+    no frame stands out: that rule missed 15 % of the cuts and put 9 of 60 one to three frames late). Two cuts may be
+    `min_gap` = 2 frames apart; within 3 frames of the previous cut the picture before must be a still one (c(i-2, i-1) > 0.6), which keeps the
+    settling frames of one blur-in from counting as a second cut. A change into black (the ending) is no cut.
+    A test reference (2000 frames): 82 cuts against 73 of the 74 of the independent finder (the 74th is the fade to black), all on the same
+    frame, plus the real cuts that the old rule or the independent finder lost.
+    -> list of dict(frame, L, R, strength)."""
     n = len(L)
-    cand = []
-    for i in range(2, n - 2):
-        if L[i] >= 20 and L[i] == L[i - 2:i + 3].max() and L[i] >= 1.3 * max(L[i - 1], L[i + 1], 4) and R[i] < 0.5:
-            cand.append(i)
+    Tn = _unit_thumbs(S)
+    cd = np.ones((9, n), np.float32)
+    for d in range(1, 9):
+        cd[d, :n - d] = (Tn[:n - d] * Tn[d:]).sum(1)
+    mean = S.reshape(n, -1).mean(1)
     keep = []
-    for i in cand:
+    for i in range(3, n - 2):
+        if not (cd[1, i - 1] < 0.5 or (L[i] >= 24 and R[i] < 0.5)):
+            continue
+        if any(cd[k + 1, i - 1] >= (0.55 if k < 5 else 0.7) for k in range(7) if i + k < n):
+            continue
+        if not (cd[2, i - 3] > 0.2 or L[i - 1] < 8 or R[i - 1] > 0.7):
+            continue
+        if mean[i:i + 5].max() < 4:
+            continue
         if keep and i - keep[-1] < min_gap:
-            if L[i] > L[keep[-1]]:
-                keep[-1] = i
+            continue
+        if keep and i - keep[-1] < 4 and cd[1, i - 2] <= 0.6:
             continue
         keep.append(i)
     out = []
     for i in keep:
         s = min(1.0, (L[i] - 14.0) / 30.0) * 0.6 + min(1.0, max(0.0, (0.5 - R[i]) / 0.5)) * 0.4
-        out.append(dict(frame=int(i), L=round(float(L[i]), 1), R=round(float(R[i]), 3), strength=round(float(s), 2)))
+        out.append(dict(frame=int(i), L=round(float(L[i]), 1), R=round(float(R[i]), 3), strength=round(float(max(0.0, s)), 2)))
     return out
 
 
@@ -425,7 +616,7 @@ def classify_transitions(S, L, cuts, fps):
             continue
         steady = list(range(f + 6, min(end, f + 15))) if ln >= 9 else list(range(max(f + 3, end - 2), end))
         st = np.median(np.array([gf(i) for i in steady]), axis=0) + 1e-3
-        post = [f + j for j in range(0, min(5, ln))]
+        post = [f + j for j in range(0, min(7, ln))]
         q = np.array([gf(i) / st for i in post])      # (k, 10): each frame's statistics over the steady ones
         loss = 1.0 - 0.5 * (q[:, 8] + q[:, 9])
         blur = float(max(0.0, loss[:4].max()))
@@ -436,6 +627,8 @@ def classify_transitions(S, L, cuts, fps):
         base = 0.5 * (pre + post_l) + 1e-3
         flash, dip = (max(luma) - base) / base, (base - min(luma)) / base
         c["blur"] = round(blur, 2)
+        if blur >= 0.2:                               # a clear blur-in: its length = up to the last of the first 7 frames that keep half of the peak loss
+            c["blur_len"] = int(max(j for j, v in enumerate(loss) if v >= 0.5 * blur) + 1)
         if flash > 0.28 and blur < 0.5 and max(luma) > 150:
             c.update(kind="flash", kind_conf=round(min(1.0, flash / 0.6), 2))
             continue
@@ -765,41 +958,69 @@ def native_stats(samples, W, H, roi_frac):
 
 # ------------------------------------------------------------------------------------------------ ending
 def ending_stats(G, fps):
-    """The last seconds: luma percentiles per frame -> kind of ending.
-    'luma fade' (dark areas go black before the highlights), 'fade to black', 'fade to white', 'cut' (nothing)."""
+    """The last seconds -> kind of ending and its two lengths, measured on the mean luma per frame (5-frame median):
+      black_s  trailing frames with mean luma < 2 (a black tail the picture rests on)
+      fade_s   the fade itself: walking back from the black tail (or from the last frame) while the smoothed luma falls by more than
+               1.5 % per frame finds the last still frame before it; the fade runs from there to the first frame under 5 % of that
+               frame's luma. A fade still running at the last frame is cut off there (a lower bound)
+      dim_s    the gradual dimming of the last take BEFORE the fade (mean luma staying under 92 % of the luma 1.5 s before the fade)
+    A test reference: fade 0.30 s, black 2.2 s (the old single number "3.08 s of luma fade" was dim + fade + black).
+    kind: 'luma fade' (dark areas go black before the highlights), 'fade to black', 'fade to white', 'cut' (nothing). `seconds` = fade_s + black_s."""
     n = len(G)
-    k = int(min(n // 3, 4 * fps))
-    seg = G[n - k:].reshape(k, -1)
-    p10 = np.percentile(seg, 10, axis=1)
-    p50 = np.percentile(seg, 50, axis=1)
-    p90 = np.percentile(seg, 90, axis=1)
-    mean = seg.mean(1)
-    base = float(np.median(mean[:max(3, k // 4)]))
-    base90 = float(np.median(p90[:max(3, k // 4)]))
-    base10 = float(np.median(p10[:max(3, k // 4)]))
+    mean = G.reshape(n, -1).mean(1)
+    sm = np.array([np.median(mean[max(0, i - 2):i + 3]) for i in range(n)])
+    b = n
+    while b > 0 and mean[b - 1] < 2.0:
+        b -= 1
+    tail = n - b
+    k4 = int(min(n // 3, 4 * fps))
+    w4 = slice(n - k4, n - k4 + max(3, k4 // 4))
+    base4 = float(np.median(mean[w4]))
     last = float(mean[-3:].mean())
+    kind, start, fade_s, black_s, dim_s, lag, spread = "cut", None, 0.0, 0.0, 0.0, None, None
+    base90_4 = float(np.median(np.percentile(G[w4].reshape(len(G[w4]), -1), 90, axis=1)))
+    p90_last = float(np.percentile(G[-3:].reshape(3, -1), 90, axis=1).mean())
+    faded = tail >= 2 or last < 0.2 * base4 or p90_last < 0.25 * base90_4
+    P = base4
+    if faded:
+        end0 = b if tail >= 2 else n
+        fs = min(end0, n - 1)
+        slack = 0
+        for i in range(end0 - 1, 0, -1):                 # the steep drop: relative fall of the smoothed luma per frame
+            if (sm[i - 1] - sm[i]) / max(sm[i - 1], 1.0) > 0.015:
+                fs, slack = i - 1, 0
+            else:
+                slack += 1
+                if slack > 1:
+                    break
+        P = float(sm[fs]) if sm[fs] > 2.0 else float(sm[max(0, fs - int(fps))])
+        fe = next((i for i in range(fs + 1, n) if sm[i] <= 0.05 * P), n)
+        fade_s = (fe - fs) / fps
+        black_s = tail / fps
+        start = float(fs / fps)
+        pre = float(np.median(mean[max(0, fs - int(round(1.5 * fps))):max(1, fs - int(round(0.4 * fps)))])) if fs > 3 else P
+        a = fs
+        while a > 0 and mean[a - 1] < 0.92 * pre:
+            a -= 1
+        dim_s = max(0.0, (fs - a) / fps)
+        s0 = max(0, fs - 8)                              # percentiles from the last frames before the fade on
+        seg = G[s0:].reshape(n - s0, -1)
+        p10, p50, p90 = (np.percentile(seg, q, axis=1) for q in (10, 50, 90))
+        m_seg = mean[s0:]
+        base = float(np.median(m_seg[:8]))
+        base90, base10 = float(np.median(p90[:8])), float(np.median(p10[:8]))
 
-    def reach(v, frac, ref):
-        idx = np.where(v < frac * ref)[0]
-        return int(idx[0]) if len(idx) else k
-    kind, start, dur, lag = "cut", None, 0.0, None
-    if last < 0.2 * base or float(p90[-3:].mean()) < 0.25 * base90:
-        a = k - 1                                      # first frame from which the mean luma stays under 92 % of the base
-        for i in range(len(mean)):
-            if np.all(mean[i:] < 0.92 * base):
-                a = i
-                break
-        start = float((n - k + a) / fps)
-        dur = float(k - a) / fps
-        # luma fade: P10 reaches ~black clearly before P90 does
+        def reach(v, frac, ref):
+            idx = np.where(v < frac * ref)[0]
+            return int(idx[0]) if len(idx) else len(v)
         lag = (reach(p90, 0.25, base90) - reach(p10, 0.25, max(base10, 10))) / fps
-        half = np.where(mean < 0.5 * base)[0]               # at half the mean luma: a luma fade keeps its highlights while the midtones are gone
-        base50 = float(np.median(p50[:max(3, k // 4)])) + 1e-3
+        half = np.where(m_seg < 0.5 * base)[0]           # at half the mean luma: a luma fade keeps its highlights while the midtones are gone
+        base50 = float(np.median(p50[:8])) + 1e-3
         spread = float(p90[half[0]] / (base90 + 1e-3) - p50[half[0]] / base50) if len(half) else 0.0
         kind = "luma fade" if spread >= 0.2 else "fade to black"
-    elif last > 1.6 * base and last > 200:
+    elif last > 1.6 * base4 and last > 200:
         kind = "fade to white"
-        start = float((n - k) / fps)
-    return dict(kind=kind, start=None if start is None else round(start, 2), seconds=round(dur, 2), final_luma=round(last, 1),
-                base_luma=round(base, 1), p10_to_p90_lag=None if lag is None else round(float(lag), 2),
-                highlight_keep=None if lag is None else round(spread, 2))
+        start = float((n - k4) / fps)
+    return dict(kind=kind, start=None if start is None else round(start, 2), seconds=round(fade_s + black_s, 2), fade_s=round(float(fade_s), 3), black_s=round(float(black_s), 3),
+                dim_s=round(float(dim_s), 2), final_luma=round(last, 1), base_luma=round(float(P), 1), p10_to_p90_lag=None if lag is None else round(float(lag), 2),
+                highlight_keep=None if spread is None else round(spread, 2))

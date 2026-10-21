@@ -4,6 +4,8 @@
 # usage: bash deliver.sh master.mp4 out.mp4          (needs mix.wav from run.sh in the current folder)
 #        ACCEPT=code[,code] bash deliver.sh ...      waives the gate's ERRORs of those codes only (written to LEIAME.md); python gate.py --codes lists them
 # Always encode the upload copy from the master, never from an earlier upload copy.
+# After the encode: peakguard.py (decoded peak) and then gate.py --sync-only on the upload copy (sound vs the song 0 ms, 1/60 s pts lattice, cuts,
+# shot flashes): when it reports an ERROR the copy is renamed *.rejected.mp4 and this script fails.
 # The copy is written under a temporary name and renamed when ffmpeg succeeds, so a failed or interrupted encode leaves no
 # half file that "refusing to overwrite" would then protect.
 set -e
@@ -22,9 +24,10 @@ FF=$(FF=${FF:-} "$PY" ff.py | tr -d '\r') && [ -n "$FF" ] || fail "ffmpeg not fo
 export FF
 "$PY" gate.py "$IN" || fail "the delivery gate refused $IN (the errors are above, each with its fix). Fix them and render again; a problem the user accepts is waived per code: ACCEPT=<code> bash deliver.sh $IN $OUT (it is written to LEIAME.md)"
 TMP="${OUT%.*}.tmp.mp4"
-# the same sound chain as run.sh: audio.master_chain() (make-up gain 1.18 / HEADROOM, optional band limit, limiter, optional trim)
+# the same sound chain as run.sh: audio.master_chain() (make-up gain 1.18 / HEADROOM, optional band limit, limiter with latency=1 so the
+# look-ahead does not delay the sound by 143 samples, optional trim)
 AF=$("$PY" -c "import audio; print(audio.master_chain())" | tr -d '\r' | tail -n 1)
-case "$AF" in volume=*) ;; *) fail "could not read the sound chain from audio.py (audio.master_chain()): run  $PY -c 'import audio; print(audio.master_chain())'  to see why";; esac
+case "$AF" in volume=*latency=1*) ;; *) fail "could not read the sound chain from audio.py (audio.master_chain()): run  $PY -c 'import audio; print(audio.master_chain())'  to see why";; esac
 "$FF" -v error -y -i "$IN" -i mix.wav -af "$AF" \
   -map 0:v -map 1:a -c:v libx264 -preset slow -crf 17 -maxrate 22M -bufsize 44M -g 60 \
   -vf "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv" -x264-params "aq-mode=3:aq-strength=0.9" -pix_fmt yuv420p \
@@ -33,4 +36,8 @@ case "$AF" in volume=*) ;; *) fail "could not read the sound chain from audio.py
   || { rm -f "$TMP"; fail "ffmpeg failed (its message is above); nothing was written under $OUT. Common causes: $IN is not a finished video (an interrupted render), or the disk is full"; }
 mv "$TMP" "$OUT"
 "$PY" peakguard.py "$OUT" chain mix.wav || fail "the decoded sound of $OUT clips (above); the picture is fine"
+# the file that leaves is the UPLOAD COPY, whose picture was re-encoded and whose sound was made again from mix.wav: the sync audit runs on
+# it too (audio vs the song, pts lattice, frame count, cuts, shot flashes), not only on the master. On an ERROR the copy is renamed
+# *.rejected.mp4 (never left under the name that gets uploaded; kept to look at).
+"$PY" gate.py --sync-only "$OUT" || { mv -f "$OUT" "${OUT%.*}.rejected.mp4"; fail "the sync audit of the upload copy failed (the errors are above); the copy was renamed ${OUT%.*}.rejected.mp4 and the master $IN is untouched"; }
 echo "done $OUT"

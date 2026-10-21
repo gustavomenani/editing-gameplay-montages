@@ -20,6 +20,12 @@ Footage comes from the sub-frame store (real frames + RIFE in-betweens). Every o
 footage over its shutter interval (exact time sampling + real motion blur), so nothing steps.
 All compositing is done in linear light.
 
+Timing (timeline SYNC = 2; the script stops without it): every cut and every shot sits on an exact output frame (CUTF, KILLF = the frames
+that SHOW them, see timeline_ref_example.py vis()). The take on screen is T.take_of(n). Every accent of one shot starts AND peaks on its
+frame nk (cam punch and shake, exposure pop, fringe, IMPACT burst / split / rays / inverted frame, the vertical backdrop pulse); a bump's pop
+and nudge likewise on nearest_frame(beat) - HIT_LEAD. Frames nk - 1 and nk sample the exact source position (no shutter blend), so the
+muzzle-flash frame K is whole on nk and absent on nk - 1; every other frame keeps its shutter.
+
 usage: python render.py n0 n1 out.mp4            frames n0..n1-1 as video (no sound)
        python render.py n0 n1 out.jpg [step]     stills for inspection (one frame: full size; several: contact sheet)"""
 import os, sys, math, glob, json, subprocess
@@ -28,6 +34,11 @@ import preflight
 import numpy as np
 import cv2
 T = preflight.timeline()
+if getattr(T, "SYNC", 0) < 2:
+    sys.exit("render.py: timeline.py has no SYNC = 2: it predates the frame-exact timing contract (every cut and shot on an exact output frame, "
+             "kill beats = the frames that SHOW the shots, hits = the musical beats). Copy the timing block of scripts/refstyle/timeline_ref_example.py "
+             "(SYNC, hit(), frame_beat(), nearest_frame(), vis(), the draft:cut block with CUT_LEAD / HIT_LEAD, the SEGS loop, take_of(), active()) "
+             "into timeline.py, or redraft it with draft_ref_timeline.py.")
 import look as opts
 LK = opts.get(T)                     # the edit options of timeline.py (LOOK); the defaults are the delivered look, byte for byte
 import textfx
@@ -64,8 +75,28 @@ BLUR_IN = 5                          # frames a blur-in lasts
 if not os.path.exists("posmap.json"):
     sys.exit("posmap.json is missing: run  python posmap.py  first (it also works while prep.py is still building the store)")
 POSMAP = json.load(open("posmap.json"))        # measured position of every stored sixteenth (posmap.py)
-CUTF = [int(math.ceil((s["r0"] - T.R0) * T.FPB - 1e-6)) for s in SEGS]          # first output frame of every take
-KILLF = [[int(math.ceil((k - T.R0) * T.FPB - 1e-6)) for k, lv in s["kills"]] for s in SEGS]   # first output frame at / after every shot
+
+
+def _frame(r, what):
+    """The output frame a beat of timeline.py sits on. Under SYNC 2 every cut and shot beat IS a frame instant (R0 + n / FPB, through
+    vis()): anything else would put the picture off its frame, so it stops instead of rounding."""
+    n = T.nearest_frame(r)
+    if abs((r - T.R0) * T.FPB - n) > 1e-6:
+        sys.exit(f"render.py: {what} (beat {r:.6f}) is not on an output frame ({(r - T.R0) * T.FPB:.4f} frames from R0). "
+                 "Under SYNC = 2 every cut and every kill beat of a take is vis(musical beat, lead): build the segments with the SEGS loop of "
+                 "timeline_ref_example.py (copy its timing block) or redraft with draft_ref_timeline.py.")
+    return n
+
+
+CUTF = [_frame(s["r0"], f"the start of take {i}") for i, s in enumerate(SEGS)]            # frame every take's picture starts on
+_dup = [i for i, c in enumerate(CUTF) if T.take_of(c) != i]
+if _dup:
+    sys.exit(f"render.py: take {_dup[0]} has no output frame of its own (two cuts on frame {CUTF[_dup[0]]}): timeline.py must keep its cuts at least one frame apart")
+KILLF = [[_frame(k, f"kill {j} of take {i}") for j, (k, lv) in enumerate(s["kills"])] for i, s in enumerate(SEGS)]      # the frame of every shot (K whole)
+HIT_LEAD = int(T.HIT_LEAD)
+BUMPF = [(T.nearest_frame(b) - HIT_LEAD, st) for b, st in BUMPS]                           # a bump is shown like a shot: HIT_LEAD frames before its hit
+ALLKF = sorted((nk, lv) for ks, s in zip(KILLF, SEGS) for nk, (k, lv) in zip(ks, s["kills"]))      # every shot frame of the video (vertical backdrop pulse)
+CRISP = [{m for nk in ks for m in (nk - 1, nk)} for ks in KILLF]                          # per take: frames sampled at the exact source position (no shutter)
 
 
 # ---------------------------------------------------------------- footage
@@ -152,43 +183,65 @@ class Store:
 
 
 # ---------------------------------------------------------------- camera
-def cam(i, u):
-    """Zoom / offset (source px) / roll (deg) of the virtual camera over take i at beat u."""
+# Every accent of a shot (or a bump) STARTS and PEAKS on the shot's own frame nk (KILLF / BUMPF) and is measured in whole frames since it:
+# dn = n - nk, d = dn / FPB beats (no beat-domain window: a float compare flips a frame on rounding). The punch, shake and nudge
+# envelopes of the timeline rise over several frames (peak at +2.9 / +1.8 / +1.5 frames, 0 on the shot frame itself); here the same
+# envelope is entered at its peak (d + _pk), so frame nk carries the full amplitude and the decay is the same curve as before.
+def _pk(attack, release):
+    """Where (1 - e^(-x/attack)) e^(-x/release) peaks, in beats."""
+    return attack * math.log((attack + release) / attack)
+
+
+PK_PUNCH, PK_SHAKE, PK_NUDGE = _pk(0.05, 0.35), _pk(0.03, 0.22), _pk(0.03, 0.16)
+
+
+def shake_env(d):
+    """Damped envelope of a shot's shake d beats after its frame (the timeline's curve, entered at its peak: full amplitude ON the shot frame)."""
+    x = d + PK_SHAKE
+    return (1 - math.exp(-x / 0.03)) * math.exp(-x / 0.22)
+
+
+
+def cam(i, n):
+    """Zoom / offset (source px) / roll (deg) of the virtual camera over take i on output frame n."""
     s = SEGS[i]
     vz, vx, vy = s["view"]
     if s.get("calm"):
         return vz, vx, vy, 0.0
+    u = T.frame_beat(n)
     z = s["push"] * min(1.0, max(0.0, (u - s["r0"]) / max(1e-6, s["r1"] - s["r0"])))     # slow push-in over the take
     ox = oy = th = 0.0
-    for k, lv in s["kills"]:
-        d = u - k
-        if 0 <= d < 2.5:
+    for (k, lv), nk in zip(s["kills"], KILLF[i]):
+        dn = n - nk
+        d = dn * DR
+        if dn >= 0 and d < 2.5:
             A, amp, _ = ACC[lv]
-            env = (1 - math.exp(-d / 0.03)) * math.exp(-d / 0.22)                         # damped, never random
+            env = shake_env(d)                                                            # damped, never random
             ox += amp * env * math.sin(2 * math.pi * 2.7 * d + 1.7 * k)
             oy += 0.7 * amp * env * math.cos(2 * math.pi * 3.3 * d + 2.3 * k)
             th += 0.05 * amp * env * math.sin(2 * math.pi * 2.2 * d + k)
-            z += A * T.punch(d, 0.05, 0.35)
-    for b, st in BUMPS:                                                    # a music hit without a kill: a 1.2 % nudge (LOOK kill_zoom)
-        d = u - b
-        if 0 <= d < 1.0:
-            z += 0.012 * KZ * st * T.punch(d, 0.03, 0.16)
+            z += A * T.punch(d + PK_PUNCH, 0.05, 0.35)
+    for nb, st in BUMPF:                                                   # a music hit without a kill: a 1.2 % nudge (LOOK kill_zoom)
+        dn = n - nb
+        d = dn * DR
+        if dn >= 0 and d < 1.0:
+            z += 0.012 * KZ * st * T.punch(d + PK_NUDGE, 0.03, 0.16)
     return vz * (1.0 + z), vx + ox, vy + oy, th
 
 
-def look(i, r):
-    """Exposure pop and extra colour fringing from the kills of take i."""
+def look(i, n):
+    """Exposure pop and extra colour fringing from the kills of take i (and the bumps) on output frame n: full on the shot frame."""
     expo, ca = 1.0, CA0
-    for k, lv in SEGS[i]["kills"]:
-        d = r - k
-        if d >= -0.02:
-            d = max(d, 0.0)
+    for nk, (k, lv) in zip(KILLF[i], SEGS[i]["kills"]):
+        dn = n - nk
+        if dn >= 0:
+            d = dn * DR
             expo += ACC[lv][2] * math.exp(-d / 0.10)
             ca += CA_KILL[lv - 1] * math.exp(-d / 0.25)
-    for b, st in BUMPS:                                                    # ... and a flash of light (calm takes too; LOOK flash, fringe)
-        d = r - b
-        if -0.01 <= d < 1.0:
-            d = max(d, 0.0)
+    for nb, st in BUMPF:                                                   # ... and a flash of light (calm takes too; LOOK flash, fringe)
+        dn = n - nb
+        d = dn * DR
+        if dn >= 0 and d < 1.0:
             expo += 0.22 * FL * st * math.exp(-d / 0.07)
             ca += 0.0018 * FRG * st * math.exp(-d / 0.12)
     return expo, ca
@@ -441,14 +494,14 @@ def warp_window(S, z, ox, oy, th, ca):
     return cv2.merge(chans)
 
 
-def compose_vertical(S, s, r, z, ox, oy, th, ca, expo, i, n):
+def compose_vertical(S, s, z, ox, oy, th, ca, expo, i, n):
     """Backdrop + gameplay window (linear light), before the words and the transition. Inside the window (it stays put): the camera,
     the kill punch / shake, the exposure pop of kills and bumps, the IMPACT radial burst and RGB split; the backdrop only pulses on kills."""
     tiny = cv2.resize(S[:, 656:1264], (27, 48), interpolation=cv2.INTER_AREA)          # the centre 9:16 strip of the footage
     pulse = glow = 0.0
-    for k, lv, _ in T.KILLS:                                                           # the backdrop and the halo light up on a kill
-        d = r - k
-        if d >= 0:
+    for nk, lv in ALLKF:                                                               # the backdrop and the halo light up on the shot's frame
+        if n >= nk:
+            d = (n - nk) * DR
             pulse += (0.5, 0.8, 1.2)[lv - 1] * math.exp(-d / 0.35) * FL
             glow += (0.5, 0.8, 1.3)[lv - 1] * math.exp(-d / 0.40)
     bg = cv2.resize(np.maximum(tiny, 0), (W, H), interpolation=cv2.INTER_CUBIC)
@@ -475,16 +528,20 @@ def render_frame(n, store):
     r = T.frame_beat(n)
     if r >= T.LUMA_FADE[1]:                                            # after the ending fade: black, no footage needed
         return np.zeros((H, W, 3), np.uint8)
-    i = T.active(r)[0]
+    i = T.take_of(n)
     s = SEGS[i]
-    h = s["shutter"] * DR / 2
     mp = s["map"]
-    S = store.sample(s["clip"], float(mp(r - h)[0]), float(mp(r + h)[0]))
-    z, ox, oy, th = cam(i, r)
-    expo, ca = look(i, r)
+    if n in CRISP[i]:                                                  # the shot frame and the one before: the exact source position, no shutter,
+        p = float(mp(r)[0])                                            # so K's muzzle flash is whole on nk and absent on nk - 1
+        S = store.sample(s["clip"], p, p)
+    else:
+        h = s["shutter"] * DR / 2
+        S = store.sample(s["clip"], float(mp(r - h)[0]), float(mp(r + h)[0]))
+    z, ox, oy, th = cam(i, n)
+    expo, ca = look(i, n)
     expo *= EXPO                                                       # LOOK exposure (1 = as before)
     if frame.VERT:
-        img = compose_vertical(S, s, r, z, ox, oy, th, ca, expo, i, n)
+        img = compose_vertical(S, s, z, ox, oy, th, ca, expo, i, n)
     else:
         img = warp(S, z, ox, oy, th, ca)
         if expo != 1.0:

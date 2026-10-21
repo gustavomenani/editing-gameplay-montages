@@ -54,12 +54,16 @@ What the house example does, and why:
    bass are often felt in half time). Also loudness and bass per second, kick pattern per bar, and every
    bass re-entry after a gap, in time order: those are the drops. Pick the drop that is followed by
    about as much music as the material needs (house example: track beat 63 at 29.5 s; the re-entry at beat 132
-   became the place of the final kill). A "WEAK" fit strength means a track without a clear beat.
-2. `music_grid.py BPM BEAT0`: the true first-beat time, to about 1 ms. It warns when a grid shifted by
-   an eighth or a sixteenth of a beat fits about as well (syncopated trap, phonk) and lists the
-   alternative BEAT0, and it prints a corrected BPM when the one given is a little off or drifts. A track
-   whose tempo moves by more than about 0.5 % (a live drummer) cannot sit on one grid: measure only the
-   section you use, `music_grid.py BPM BEAT0 T0 T1`.
+   became the place of the final kill). A "WEAK" fit strength (strong off-beats of a band, a syncopated groove, no clear
+   drum pattern) is printed as a warning with the best fit and the drop table; only a WEAK fit that is also not steady
+   (the 30 s tempo windows or the 10 s beat phase disagree) gives `NO TEMPO`, exit 1: no tempo one grid can hold.
+2. `music_grid.py BPM BEAT0 [T0 T1]`: the true first-beat time from the measured drum attacks, with an honest
+   verdict. It REFUSES a BPM that another tempo fits much better (exit 1, the better BPM named, no BEAT0), warns
+   when a grid shifted by an eighth or a sixteenth of a beat fits about as well (syncopated trap, phonk) and lists
+   the alternative BEAT0, corrects the tempo only from 60 s of track, and prints the median offset, the share of
+   hits beyond 8.3 ms and the worst hit. `constant grid NOT adequate` (a live drummer, swing, a tempo that moves by
+   more than about 0.5 %) means no event goes on a grid beat: `music_hits.py` writes every hit's own time and every
+   kill, cut, bump and boom goes on it. Measure only the section you use: `music_grid.py BPM BEAT0 T0 T1`.
 3. Number the beats so the section reads easily: `M0` = the track beat that becomes timeline beat 0
    (drop on track beat D: `M0 = D + 1`, so the drop is beat -1; house example: 64). `R0` = the first kill minus
    its lead-in (house example: -5.2, a 4.2-beat lead into the kill on the drop). `R1` = the last kill plus its
@@ -83,14 +87,14 @@ the explanation it prints (also written as a comment above every segment), look 
 
 ```json
 {"music": "src/music.flac", "bpm": 130, "beat0": 0.4613, "drop_beat": 63, "cuts_on": "bass", "length": 22,
- "kills": [{"clip": "c4", "K": 1203, "level": 3, "lag": -0.25},
+ "kills": [{"clip": "c4", "K": 1203, "level": 3},
            {"clip": "c10", "K": 5362}, {"clip": "c10", "K": 5474, "continuous": true},
            {"clip": "c18", "K": 1305, "level": 2}, {"id": 73}]}
 ```
 
 `bpm` and `beat0` are the ones `music_grid.py` printed; `drop_beat` is the TRACK beat of the drop from
 `music_tempo.py`; `{"id": N}` takes clip and K from `kills.json`; `continuous` keeps a kill in the previous take
-(same clip, later K); `lag` comes from `kill_lags.py` (run it on the draft, put the values in the plan, draft again).
+(same clip, later K); `lag` (frames the gunshot trails the picture) is normally left out: `audio.py` measures every kill's gunshot, and `kill_lags.py` shows the strip of a kill it cannot; a kill whose K is unverified (`kills.json` `how` other than `ammo` / `flash`) is refused unless its entry says `"k_checked": true` after you read the `kverify.py` sheets; `cut_lead_frames` / `hit_lead_frames` (default 1 and 1, or the `ref_notes.json` `adopt` values) set `CUT_LEAD` / `HIT_LEAD`.
 It encodes this file's rules: the opening kill on the drop at beat -1 (level 3, 4.2-beat lead-in, riser), kills
 on kicks (low >= 0.5) or snares (mid >= 0.6), cuts on kicks without a kill (`bass`) or free (`kills`), next kill
 >= 1.5 beats after a transition centre, >= 0.5 beat of real time after a normal kill, lead-ins 1.0 to 1.5x,
@@ -101,9 +105,8 @@ anchors inside the clips, kills on hits, cuts on kicks and the 1.5-beat rule bef
 fit (no hit on the drop, too little footage before a kill, too few kicks for the takes, a length out of reach)
 it refuses with the numbers. It never overwrites a `timeline.py` you edited (`--force` does).
 
-Measured: four drafts on the house example's song and footage (22 to 38 s, 5 to 15 kills) pass `timeline.py`,
-`music_pulses.py` (none / none) and `ranges.py`; a 16 s draft rendered with 0 identical frames, judder 0.21 and
-every flash on `+0`. The 15-kill draft has the house example's shares (46 % real time, 27 % fast, 28 % slow; the house example 47 / 24 / 29).
+Measured on a synthetic song with sample-exact truth: the worst kill error against the true attack is 2.07 ms in kills
+mode and 2.04 ms in bass mode, with all 10 transitions on a kick (the grid times it used before were up to 37 ms off).
 Limits: it cannot see abilities (no `skill=`, no 4x compression of a dash), so its fastest ramp is about 1.6x
 against the house example's 4.6x; few kills for a long edit give long lead-ins (it prints a "sparse" note under 3.5 kills per
 10 s; the house example has about 6). For the reference style use `scripts/refstyle/draft_ref_timeline.py` (reference-style.md,
@@ -134,6 +137,17 @@ Anchors are `(beat, source frame)`; `FPB` (27.69) source frames per beat is real
 (time running backwards, a gap between segments, a kill outside its segment, video longer than the
 anchors). `ranges.py` reports anchors that reach outside a clip.
 
+## Timing (SYNC 2)
+
+`timeline_example.py` carries `SYNC = 2`, `hit()`, `frame_beat()`, `nearest_frame()`, `vis()` and the `draft:cut` block
+(`CUT_LEAD`, `HIT_LEAD`, default 1 and 1). `S(...)` entries stay in MUSICAL beats (`lead()`, `tail()`, `bullet()` as
+before); a loop after `SEGS` warps each take rigidly onto frames: the cut lands on `vis(m0, CUT_LEAD)`, each kill on
+`vis(hit, HIT_LEAD)`. `s["kills"]` holds the shown beats and `s["hits"]` the musical ones (`KILLS`, `HITS`), `s["m0"]`
+the cut's musical beat; a kill without its own anchor is refused. `take_of(n)` and `active(r)` work on frame indices.
+Each transition lasts an even whole number of frames (`s["tn"]`), centred on the cut's frame, where its progress is
+0.5 (windows must not overlap). `python timeline.py` asserts every cut and shot is on an exact frame, each cut
+`CUT_LEAD` frames before its musical beat and each shot `HIT_LEAD` before its hit.
+
 ## Kill accents (`render.py`)
 
 | | level 1 | level 2 finisher | level 3 (opening and final kill only) |
@@ -160,7 +174,9 @@ Every number in this section and the next is the default of an edit option: `LOO
 them (SKILL.md, "Edit options"; `$PY look.py` prints the table). In the house style `bars` and `blur_in` do
 nothing (the slow-motion window narrowing is `bars=` of a segment, not a LOOK option), `impact` switches the
 level-3 impact frame, and a strong `vignette` also reaches further in, because the window sits well inside
-the canvas. Absent or `"padrao"`: byte-identical to the house example's render.
+the canvas. Absent or `"padrao"`: the house example's own look. Every accent of a shot starts on its shot frame and peaks
+there (instant attack, then the ring-down; the pre-kill zoom build-up peaks there too): the punch and the shake used to
+ramp up over 2 to 3 frames after the shot.
 
 ## Layout and finishing
 
@@ -187,7 +203,7 @@ An overlapping transition is centred on the first anchor of the incoming segment
 both clips for half its length beyond the anchors (`ranges.py` accounts for it). Keep kills out of it:
 the next kill at least 1.5 beats after its centre. With `CUTS_ON = "bass"`, centre it (a `zcut`: put the
 cut) on a kick or bass hit: in trap the 808s are sparse, so use the kicks that carry no kill;
-`music_pulses.py` then prints "transitions not on a kick / bass hit" and it must say "none". The example
+`music_pulses.py`'s PLACEMENT CHECK then tests every cut against the kicks (a kick of strength 0.4 or more within 8.3 ms) and must end without a FAIL. The example
 timeline is `"kills"` (0 of the house example's 13 transitions sit on a kick, measured): with `"bass"` do not copy its
 transition beats. Vary direction and kind; the house example uses 4 whips, 4 zcuts, 2 zooms, 1 spin, 1 dissolve and 1 soft.
 
@@ -198,7 +214,9 @@ transition beats. Vary direction and kind; the house example uses 4 whips, 4 zcu
   1.8x. Kills of level 2 and 3 are always heard. `mute=True` silences a segment (house example: the end card).
   `FADE_OUT` fades music, game sound and effects together.
 - `lag`: gunshots trail the picture by 1.4 to 3.3 frames in these recordings, and it varies per
-  kill. With the measured value the shot lands within about 1 ms of the beat (`audio.py` prints it).
+  kill. `audio.py` measures it per kill (`kill_lags.measure`, to the sample) and corrects it for the offset between the
+  flash frame and the musical hit, so the shot sounds on the hit itself (within 0.14 ms in the scratch tests). It stops
+  on a kill it cannot measure, and on a typed `S(lag=...)` that disagrees with the measurement by more than 0.25 frame.
 - A clip with talking: `voice=0.8` keeps natural pitch and lets the reaction run on through the slow
   motion. `stretch=True` keeps the pitch of in-game voice lines when a take runs off real time, but
   it can shift a gunshot by tens of ms when the speed at the kill is not exactly 1 (one trial: +32 ms).

@@ -29,8 +29,10 @@ render. The recommendation given was to keep and improve the own pipeline, and t
 - **Motion blur**: the community tools (blur, smoothie-rs) interpolate to about 5x the frame rate and
   blend back to 60. The pipeline now does the same thing itself, per output frame and without
   blurring the HUD differently from the scene.
-- **Beat tracking**: Beat This! (MIT, runs on CPU) returns beats and downbeats. Not adopted: measuring
-  onsets against a comb grid (`music_grid.py`) placed the grid within 1 ms (median) on the track used.
+- **Beat tracking**: Beat This! (MIT, runs on CPU) returns beats and downbeats. Not adopted: `music_grid.py` measures
+  every drum attack against a comb grid, refuses a BPM that does not fit and says whether one constant grid fits at all;
+  on synthetic songs with known truth its first beat was 0.1 to 1.6 ms off, and where no grid fits (a live drummer)
+  every event goes on the hit's own measured time (`music_hits.py`).
 - **Sound**: whooshes and risers are synthesised. Impact sounds from a sound-effects pack would add
   more, but need the user's ear to approve.
 - **Skills that would not help**: video-use (cuts by speech transcript, needs a paid ElevenLabs key),

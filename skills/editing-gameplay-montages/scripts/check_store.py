@@ -12,6 +12,9 @@ import numpy as np
 import cv2
 import rifeutil
 T = preflight.timeline()
+if "view" in T.SEGS[0] and getattr(T, "SYNC", 0) < 2:         # reference style: hard cuts on exact frames (the house style overlaps its transitions)
+    sys.exit("check_store.py: timeline.py has no SYNC = 2 (it predates the frame-exact timing contract): copy the timing block of "
+             "scripts/refstyle/timeline_ref_example.py into it, or redraft it with draft_ref_timeline.py.")
 SH = float(re.search(r"^SHUTTER = ([0-9.]+)", open("render.py", encoding="utf-8").read(), re.M).group(1))
 clips = sorted({s["clip"] for s in T.SEGS})
 damaged, files = [], {}
@@ -26,11 +29,15 @@ for c in clips:
         print(f"store/{c}/ has no sub-frames: python ranges.py && python prep.py ranges.json builds the store")
 h = SH / T.FPB / 2
 bad, nkeys, used = 0, [], set()
+# what the render reads per output frame: the take(s) T.active() gives for that frame (reference style: the one take of T.take_of(n), chosen
+# by frame index; house style: both layers during an overlapping transition) over the shutter window [p(r - h), p(r + h)]; the reference
+# style's shot frame nk and the one before read the exact position p(r) only (render.py, crisp frames), a point inside the same window.
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
     a, b, p, tin = T.active(r)
+    shown = [a] if b is None else [a, b]
     tot = 0
-    for i in ([a] if b is None else [a, b]):
+    for i in shown:
         s = T.SEGS[i]; mp = s["map"]
         hh = s.get("shutter", SH) / T.FPB / 2
         p0, p1 = float(mp(r - hh)[0]) * 16, float(mp(r + hh)[0]) * 16

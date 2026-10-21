@@ -50,13 +50,21 @@ while [ $left -gt 0 ]; do
 done
 T1=$SECONDS
 for i in 0 1 2; do [ -s part_$i.mp4 ] || { tail_log part_$i.log; fail "part_$i.mp4 was not written"; }; done
-printf "file 'part_0.mp4'\nfile 'part_1.mp4'\nfile 'part_2.mp4'\n" > parts.txt
+# parts.txt gives every part its EXACT duration (frames / 60 s): the mp4 muxer stores a part's duration in whole milliseconds and
+# sometimes rounds it down (a part of 554 frames = 9.2333 s stored as 9.233 s), and the concat demuxer starts the next part at the
+# stored duration, so the next part started 0.33 ms (5 ticks) early and every later frame was early against the sound.
+"$PY" -c "S=[0,$A,$B]; E=[$A,$B,$N]; open('parts.txt','w').write(''.join(\"file 'part_%d.mp4'\nduration %.9f\n\" % (i, (E[i]-S[i])/60) for i in range(3)))" || fail "could not write parts.txt"
 "$FF" -v error -y -f concat -safe 0 -i parts.txt -c copy video.mp4 || fail "joining the three parts failed (ffmpeg's message is above)"
+# the picture's time lattice: every video pts step exactly 1/60 s and N frames, or the render stops here, naming the join
+"$PY" ff.py pts video.mp4 "$N" "$A" "$B" || fail "the joined video.mp4 does not have exactly $N frames 1/60 s apart (above: the step and the join it sits on). Render again; if it repeats, run  $FF -i part_0.mp4  and look at each part's duration"
 "$PY" audio.py > audio.log 2>&1 || { tail_log audio.log; fail "audio.py failed: the log above says why (the song must cover the video: python preflight.py checks it)"; }
-# volume=2.36: mix.wav is written at half level (headroom, see audio.py), 2.36 = 1.18 x 2, then the limiter.
+# volume=2.36: mix.wav is written at half level (headroom, see audio.py), 2.36 = 1.18 x 2, then the limiter. The chain comes from
+# peakguard.py (ff.limiter(): alimiter ... latency=1, because the limiter's 3 ms look-ahead otherwise delays the whole sound by 143 samples).
 # -aac_pns 0 etc.: ffmpeg's AAC encoder otherwise overshoots the limiter by up to 3 dB on kick transients (clipping)
+AF=$("$PY" peakguard.py --filter 2.36 0.82 | tr -d '\r' | tail -n 1)
+case "$AF" in volume=*latency=1*) ;; *) fail "could not read the sound chain from peakguard.py: run  $PY peakguard.py --filter 2.36 0.82  to see why";; esac
 # written under a temporary name: a mux that fails never leaves a half file under the master's name
-"$FF" -v error -y -i video.mp4 -i mix.wav -af "volume=2.36,alimiter=limit=0.82:attack=3:release=60:level=disabled" \
+"$FF" -v error -y -i video.mp4 -i mix.wav -af "$AF" \
   -map 0:v -map 1:a -c:v copy -c:a aac -b:a 320k -aac_pns 0 -aac_tns 0 -aac_is 0 -metadata comment="timeline_sha1=$TL_SHA" -movflags +faststart -f mp4 "$OUT.tmp.mp4" \
   || { rm -f "$OUT.tmp.mp4"; fail "adding the sound failed (ffmpeg's message is above); video.mp4 and mix.wav are intact, repeat the last ffmpeg line of run.sh"; }
 mv -f "$OUT.tmp.mp4" "$OUT"

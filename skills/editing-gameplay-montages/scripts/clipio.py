@@ -74,9 +74,14 @@ def colour_fix(clip):
 
 
 def frame_args(clip, a, b, vf=None):
-    """ffmpeg arguments that output exactly frames a..b (inclusive) of the clip."""
+    """ffmpeg arguments that output exactly frames a..b (inclusive) of the clip.
+    The select window is 4 ms either side of the wanted pts (timestamps are written with 4 decimals), but never wider than 0.45 of the
+    gap to the frame next to it: some recordings have frames 4-9 ms apart (a recorder catching up after a stall) and a flat 4 ms window
+    would select that neighbour too. A window under half the nearest interval can never reach a neighbour; elsewhere nothing changes."""
     p = pts(clip)
-    sel = f"select='between(t\\,{p[a] - 0.004:.4f}\\,{p[b] + 0.004:.4f})'"
+    w_lo = 0.004 if a == 0 else max(0.0002, min(0.004, 0.45 * (p[a] - p[a - 1])))
+    w_hi = 0.004 if b + 1 >= len(p) else max(0.0002, min(0.004, 0.45 * (p[b + 1] - p[b])))
+    sel = f"select='between(t\\,{p[a] - w_lo:.4f}\\,{p[b] + w_hi:.4f})'"
     fix = colour_fix(clip)
     return ["-copyts", "-ss", f"{max(0.0, p[a] - 0.5):.4f}", "-i", path(clip), "-map", "0:v:0",
             "-vf", sel + ("," + fix if fix else "") + ("," + vf if vf else ""), "-fps_mode", "passthrough"]

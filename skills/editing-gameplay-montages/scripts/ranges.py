@@ -12,14 +12,21 @@ import preflight
 import numpy as np
 import clipio
 T = preflight.timeline(music=True)
+if "view" in T.SEGS[0] and getattr(T, "SYNC", 0) < 2:         # reference style: hard cuts on exact frames (the house style overlaps its transitions)
+    sys.exit("ranges.py: timeline.py has no SYNC = 2 (it predates the frame-exact timing contract): copy the timing block of "
+             "scripts/refstyle/timeline_ref_example.py into it, or redraft it with draft_ref_timeline.py.")
 
 SH = float(re.search(r"^SHUTTER = ([0-9.]+)", open("render.py", encoding="utf-8").read(), re.M).group(1))
 h = SH / T.FPB / 2
 base, dense, bad = {}, {}, 0
+# the render reads, per output frame: the take(s) T.active() gives for that frame (reference style: the one take of T.take_of(n), chosen by
+# frame index; house style: both layers during an overlapping transition) over the shutter window [p(r - h), p(r + h)]; the reference
+# style's shot frame nk and the one before sample the exact position p(r) instead (render.py, crisp frames): a point inside that same window.
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
     a, b, p, tin = T.active(r)
-    for i in ([a] if b is None else [a, b]):
+    shown = [a] if b is None else [a, b]
+    for i in shown:
         s = T.SEGS[i]
         c = s["clip"]
         nf = clipio.n_frames(c)

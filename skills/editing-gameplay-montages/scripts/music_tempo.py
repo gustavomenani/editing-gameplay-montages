@@ -9,8 +9,14 @@ is the beat: the slower tempo wins unless the half beats in between are as stron
 members are printed with their evidence, so you can overrule it: "tempo candidates" is the place to look.
 The phase printed here is only provisional (within about 10 ms on drum machines, more on live playing, and
 it is the beat grid's phase: the first beat may be a bar or two before the music really starts): ALWAYS refine
-it with music_grid.py before placing anything on a beat. Range 68..182 bpm; a track with no drum pattern
-prints "WEAK" under the fit.
+it with music_grid.py before placing anything on a beat. Range 68..182 bpm. Is the tempo steady? It is read again
+in every 30 s window on its own ("tempo steady?"): windows that differ by more than 0.3 % (a live drummer, a tempo
+change) mean one BPM / BEAT0 is only true near the part that was measured. A WEAK fit (under 2.5x the average tempo:
+strong off-beats of a live band, a syncopated groove, or no clear drum pattern) is printed WITH a "WEAK" note and the
+tables, exit status 0, when the steadiness checks that can judge the track agree on one straight grid (the 30 s tempo
+windows, from 45 s of track; the beat phase of the strong attacks in 10 s windows, scatter under 10 ms, from 30 s);
+when either says no, or neither can judge (a short track, too few strong attacks), there is no tempo: the script says
+"NO TEMPO", skips the beat-based tables and exits with status 1.
 The last block lists bass re-entries: the usual place for the first kill ("the drop"). With the drop on
 track beat D, M0 = D + 1 makes it timeline beat -1 and the next bar start at beat 0."""
 import glob, subprocess, sys
@@ -151,10 +157,111 @@ else:
 first = (ph / fps + LAT) % (60 / final)             # frame label -> time of the onset (the flux fires before the audible attack)
 if first < 0.05:                                    # a beat that close to the start may really lie before it: count from the next one
     first += 60 / final
-print("best fit: %.3f bpm, first beat at %.3f s (provisional: refine with  python music_grid.py %.3f %.3f)" % (final, first, final, first))
 fit_strength = float(cs.max() / np.median(cs))
-print("fit strength: %.1fx the average tempo%s" % (fit_strength, "" if fit_strength >= 2.5 else
-      "  <- WEAK: no clear drum pattern in this track (ambient, a cappella, noise, or a very sparse intro): do not trust the tempo above"))
+WEAK = fit_strength < 2.5
+import contextlib, io
+_buf = io.StringIO()
+_cm = contextlib.redirect_stdout(_buf)
+_cm.__enter__()                                      # the steadiness checks below print into a buffer, see where it is written out
+
+
+def window_tempo(a, b, centre, span):
+    """Best tempo of the onset curve frames a .. b within +-span of `centre` (comb with interpolated pegs, 0.02 % steps): -> (bpm, score)"""
+    v = osm[a:b]
+    fr_ = np.arange(len(v))
+
+    def score(bpm, nph):
+        per_ = 60 * fps / bpm
+        k_ = np.arange(int((len(v) - 2) / per_))
+        p_ = np.linspace(0, per_, nph, endpoint=False)[:, None] + k_[None, :] * per_
+        return float(np.interp(p_.ravel(), fr_, v).reshape(p_.shape).sum(1).max() / np.sqrt(len(k_)))
+
+    cand = centre * (1 + np.arange(-span, span + 1e-9, 0.0007))
+    sc_ = np.array([score(bpm, 48) for bpm in cand])
+    b1 = float(cand[int(np.argmax(sc_))])
+    fine_ = b1 * (1 + np.arange(-0.0006, 0.00061, 0.00002))
+    fs_ = np.array([score(bpm, 96) for bpm in fine_])
+    return float(fine_[int(np.argmax(fs_))]), float(fs_.max())
+
+
+# Is the tempo STEADY? One straight grid is only true for a track that does not wander: the tempo of every 30 s window, on its own.
+steady = None
+if len(x) / SR >= 45:
+    wins = []
+    n30 = int(30 * fps)
+    starts = list(range(0, len(osm) - n30 + 1, n30))
+    if len(osm) - (starts[-1] + n30 if starts else 0) >= 10 * fps:         # the stretch after the last whole window, if it is 10 s or more
+        starts.append(len(osm) - n30)
+    for a0 in starts:
+        wb, ws = window_tempo(a0, a0 + n30, final, 0.08)               # +-8 %: a tempo change of a few % is found, not missed
+        wins.append((a0 / fps, wb, ws))
+    if wins:
+        ref_s = float(np.median([w[2] for w in wins]))
+        good = [w for w in wins if w[2] >= 0.6 * ref_s]               # a window with no drums in it (a break, an outro) is not judged
+        bpms = np.array([w[1] for w in good])
+        steady = (len(good) >= 2) and float((bpms.max() - bpms.min()) / np.median(bpms)) <= 0.003
+        print("tempo per 30 s window (bpm, from the drums of that window alone): " + "  ".join("%d s %.2f%s" % (w[0], w[1], "" if w in good else " (no clear beat: not judged)") for w in wins))
+        if len(good) < 2:
+            steady = None
+            print("tempo steady? not judged (fewer than two windows with drums)")
+        elif steady:
+            print("tempo steady? yes: the 30 s windows agree within %.2f %% (%.2f .. %.2f bpm)" % (
+                100 * (bpms.max() - bpms.min()) / np.median(bpms), bpms.min(), bpms.max()))
+        else:
+            first_h, second_h = np.median(bpms[:len(bpms) // 2]), np.median(bpms[len(bpms) // 2:])
+            print("WARNING tempo steady? NO: the 30 s windows differ by %.2f %% (%.2f .. %.2f bpm; first half %.2f, second half %.2f): a live drummer "
+                  "or a tempo change. One BPM / BEAT0 is only true near the part it was measured on: measure the section you will use "
+                  "(music_grid.py BPM BEAT0 T0 T1) and place every event on hits.json times (music_hits.py), never on the grid" % (
+                      100 * (bpms.max() - bpms.min()) / np.median(bpms), bpms.min(), bpms.max(), first_h, second_h))
+else:
+    print("tempo steady? not judged by the 30 s windows (a track under 45 s has fewer than two)")
+
+# The windows above see a tempo that CHANGES; a drummer who wanders around it (+-1.5 % swings every few bars) averages out inside 30 s.
+# So the phase is read too: in windows of 10 s the circular mean phase of the strong attacks on the sixteenth lines of the fitted tempo,
+# its scatter after removing a straight line (a tempo error of a few hundredths of a percent is a line, a wandering drummer is not):
+# measured on synthetic truth 0.4 ms (steady), 19..26 ms (wander, tempo change); real songs 2.7 ms (a funk song), 4.6 ms (a live band, steady).
+PHASE_MAX_MS = 10.0
+if len(x) / SR >= 30:
+    import beat_hits
+    t_att = np.array([e[0] for e in beat_hits.strong_attacks(beat_hits.attacks(beat_hits.decode(SRC)))])
+    st4 = 60.0 / final / 4
+    pw = []
+    for a in np.arange(0.0, len(x) / SR - 5.0, 10.0):
+        s_ = t_att[(t_att >= a) & (t_att < a + 10.0)]
+        if len(s_) >= 20:
+            pw.append((a + 5.0, float(np.angle(np.exp(2j * np.pi * s_ / st4).mean())) / (2 * np.pi) * st4 * 1000))
+    if len(pw) >= 3:
+        pt = np.array([p[0] for p in pw])
+        pv = np.unwrap(np.array([p[1] for p in pw]) * 2 * np.pi / (st4 * 1000)) * (st4 * 1000) / (2 * np.pi)
+        pr = pv - np.polyval(np.polyfit(pt, pv, 1), pt)
+        p_std = float(np.std(pr))
+        if p_std <= PHASE_MAX_MS:
+            print("beat phase steady? yes: the phase of the strong attacks in %d windows of 10 s scatters %.1f ms (limit %.0f)" % (len(pw), p_std, PHASE_MAX_MS))
+            if steady is None:                          # the 30 s windows could not judge: the phase alone says steady
+                steady = True
+        else:
+            print("WARNING beat phase steady? NO: the phase of the strong attacks wanders by %.1f ms (std over %d windows of 10 s, limit %.0f): a live "
+                  "drummer or a tempo that swings around %.2f: no straight grid holds it. Place every event on hits.json times (music_hits.py)" % (
+                      p_std, len(pw), PHASE_MAX_MS, final))
+            steady = False
+    else:
+        print("beat phase steady? not judged (fewer than three 10 s windows with 20 strong attacks)")
+_cm.__exit__(None, None, None)                      # the steadiness lines were collected: what the fit is called depends on them
+if WEAK and not steady:
+    print("NO TEMPO: a WEAK fit (%.1fx) AND %s: this track has no tempo one straight grid can hold. The strongest candidate (%.3f bpm, first beat %.3f s) "
+          "is NOT a tempo; the beat-based tables (kick pattern, drops) are not printed, they would sit on a grid that does not exist." % (
+              fit_strength, "a tempo or beat phase that does not stay on one straight grid" if steady is False else "no steadiness evidence (under 30 s, or too few strong attacks)",
+              final, first))
+    sys.stdout.write(_buf.getvalue())
+    sys.exit("music_tempo.py: no tempo found in %s (fit strength %.1fx, WEAK, tempo not steady): give music_grid.py a BPM you know, or choose another track / section." % (SRC, fit_strength))
+print("best fit: %.3f bpm, first beat at %.3f s (provisional, +-10 ms on drum machines, more on live playing: refine with  python music_grid.py %.3f %.3f)" % (
+    final, first, final, first))
+print("fit strength: %.1fx the average tempo" % fit_strength)
+if WEAK:
+    print("WEAK: the fit is under 2.5x the average tempo: strong off-beats (a live band, a syncopated groove) or no clear drum pattern (ambient, "
+          "a cappella, noise, a very sparse intro). It is trusted because the steadiness checks that could judge this track (the 30 s tempo "
+          "windows, the 10 s beat phase) found one straight grid.")
+sys.stdout.write(_buf.getvalue())
 beats = first + np.arange(int(len(x) / SR / (60 / final)) - 1) * (60 / final)
 
 # loudness / bass per second, to find the strongest section

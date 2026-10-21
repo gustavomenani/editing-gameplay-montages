@@ -3,12 +3,16 @@
   $PY lyrics_sync.py [lyrics.txt] [options]          (run in the project folder; $PY = the project venv, venv311)
 
 Steps (each is a script that can be run alone; this one only chains them and skips what is already done):
-  1. lyrics_stem.py       separates the voice of song seconds T0..T1 with demucs     -> lyrics/vocals.wav, lyrics/stem.json
-  2. lyrics_ctc_align.py  aligns the typed words on it with two CTC models           -> lyrics/align_mms.json, align_en.json
-  3. cues_from_alignment.py  the cues from the mean of the models, refined on the stem -> lyric_cues.json (+ a table)
-  4. lyric_sync_sheet.py  the sheet that shows whether each word starts on its syllable -> lyrics/sync_1.jpg ...
+  1. lyrics_stem.py       separates the voice of song seconds T0..T1 with demucs (sample-exact cut) -> lyrics/vocals.wav, stem.json
+  2. lyrics_ctc_align.py  aligns the typed words on it with two CTC models, 4 sub-frame runs each -> lyrics/align_mms.json, align_en.json
+  3. cues_from_alignment.py  every word on the sung ATTACK of the stem (CTC = prior)      -> lyric_cues.json, lyrics/cue_audit.json (+ a table)
+  4. lyric_sync_sheet.py  the sheet + a zoom panel per flagged word (10 ms window)          -> lyrics/sync_1.jpg ..., lyrics/zoom_1.jpg ...
+  5. lyrics_audit.py      per word: the cue vs the measured attack, in ms; exit 1 beyond 25 ms on a confident attack
 Steps 1 and 2 run in the separation venv (torch, torchaudio, demucs, soundfile; requirements_sep.txt, pipeline.md "Setup"),
-3 and 4 in this Python. The section is the video's own part of the song, timeline.py R0..R1, unless --t0 / --t1 say
+3-5 in this Python. The song (timeline.py MUSIC) must be LOSSLESS (src/music.flac, written by ingest.py): the time of every
+cue is a time of that file, and a .m4a / .mp3 is cut 8-40 ms late by `ffmpeg -ss` in the other tools. The cue start is the
+attack itself: no advance; the only visual lead is textfx's HIT_LEAD.
+The section is the video's own part of the song, timeline.py R0..R1, unless --t0 / --t1 say
 otherwise: lyrics.txt must hold EVERY word sung between T0 and T1 (a word half cut at the start is fine; a sung line
 missing from the text drags its neighbours off their syllables), so start the section where the voice is silent when you can.
 
@@ -19,7 +23,7 @@ options:
   --models mms,en   the alignment models (default both; `mms` alone for a song that is not in English)
   --red=A:B         beat range whose cues are red (repeatable; `--red=none`; write the = : a range starts with a minus sign);
                     default: the intro, before beat -0.5
-  --last-end BEAT   the last cue ends at most here;  --adv BEATS  how early a cue appears (default 0.04)
+  --last-end BEAT   the last cue ends at most here;  --adv BEATS  how early a cue appears (default 0: the cue IS the attack)
   --sep PYTHON      the separation venv's python (default $VENV_SEP, else ./venv_sep/Scripts/python[.exe])
   --redo            run steps 1 and 2 again even when their files are up to date
   --force           write the cues even when the two models disagree by over 0.35 s on a word (words that do not match)"""
@@ -47,6 +51,11 @@ D = "lyrics"
 
 import timeline as T  # noqa: E402  (MUSIC, R0, R1, beat_time)
 
+if getattr(T, "SYNC", 0) < 2:
+    sys.exit("lyrics_sync.py: timeline.py has no SYNC = 2: it is written for the old timing (words 0.04 beat early, kills on the grid). "
+             "The cues of this chain are the sung attack with NO advance (textfx.py draws the first letter HIT_LEAD frames before it): "
+             "update the project (copy scripts/ then scripts/refstyle/ over it and the SYNC block of timeline_ref_example.py).")
+
 t0 = a.t0 if a.t0 is not None else T.beat_time(T.R0)
 t1 = a.t1 if a.t1 is not None else T.beat_time(T.R1)
 t0 = max(0.0, t0)
@@ -54,6 +63,11 @@ if not t1 > t0:
     sys.exit("lyrics_sync.py: the section is empty (T0 %g, T1 %g)." % (t0, t1))
 if not os.path.isfile(T.MUSIC):
     sys.exit("lyrics_sync.py: the song %s (timeline.py MUSIC) does not exist here." % T.MUSIC)
+if os.path.splitext(T.MUSIC)[1].lower() not in (".flac", ".wav", ".w64", ".aif", ".aiff"):
+    sys.exit("lyrics_sync.py: timeline.py MUSIC = %s is not a lossless file. The words, the picture and the audio must share "
+             "ONE time axis, and `ffmpeg -ss` on a compressed file (.m4a, .mp3) starts 8-40 ms late. Decode it once (ingest.py "
+             "writes src/music.flac; by hand: ffmpeg -i SONG -c:a flac src/music.flac), set MUSIC = \"src/music.flac\" in "
+             "timeline.py and run this again (pipeline.md, \"Music\")." % T.MUSIC)
 if not a.stem_only:
     if not os.path.isfile(a.words):
         sys.exit("lyrics_sync.py: %s is missing. Write the confirmed words of the section there, one line per sung line "
@@ -80,7 +94,7 @@ def run(cmd, what):
 
 
 stem_json, vocals = os.path.join(D, "stem.json"), os.path.join(D, "vocals.wav")
-want = {"song": T.MUSIC, "size": os.path.getsize(T.MUSIC), "t0": t0, "t1": t1}
+want = {"song": T.MUSIC, "size": os.path.getsize(T.MUSIC), "t0": t0, "t1": t1, "cut": 3}     # cut 3 = sample-exact, >= 9 s separated (lyrics_stem.py)
 have = {}
 if os.path.isfile(stem_json) and os.path.isfile(vocals):
     have = json.load(open(stem_json))
@@ -96,10 +110,11 @@ aligns = [os.path.join(D, "align_%s.json" % m) for m in models]
 
 
 def aligned_for_these_words(p):
-    """the alignment file exists, is newer than the stem and holds exactly the typed words"""
+    """the alignment file exists, is newer than the stem, holds exactly the typed words and comes from the exact-stride aligner"""
     if not (os.path.isfile(p) and os.path.getmtime(p) > os.path.getmtime(vocals)):
         return False
-    return [w["w"] for w in json.load(open(p, encoding="utf-8"))] == [w["sung"] for w in words]
+    al = json.load(open(p, encoding="utf-8"))
+    return [w["w"] for w in al] == [w["sung"] for w in words] and all("s_runs" in w for w in al)    # s_runs: exact stride, sub-frame runs
 
 
 fresh = all(aligned_for_these_words(p) for p in aligns)
@@ -116,8 +131,15 @@ if a.last_end:
     cmd += ["--last-end=" + a.last_end]
 if a.adv:
     cmd += ["--adv", a.adv]
+cmd += ["--audit-out", os.path.join(D, "cue_audit.json")]
 if a.force:
     cmd += ["--force"]
 run(cmd, "cues -> lyric_cues.json")
-run([sys.executable, "lyric_sync_sheet.py", vocals, repr(t0)] + aligns + ["--out", os.path.join(D, "sync")], "sync sheet")
-print("\nnext: read lyrics/sync_*.jpg (every red line on the left edge of its syllable), then $PY timeline.py and a few stills")
+run([sys.executable, "lyric_sync_sheet.py", vocals, repr(t0)] + aligns + ["--out", os.path.join(D, "sync"), "--zoom", "flagged"], "sync sheet + zoom panels")
+print("\n== audit: every cue against the attack measured on the stem", flush=True)
+bad = subprocess.run([sys.executable, "lyrics_audit.py", "--dir", D]).returncode
+if bad:
+    sys.exit("\nlyrics_sync.py: the audit found words that are not on a sung attack (above). Look at lyrics/zoom_*.jpg for them "
+             "and pin each wrong one with `word@beat` in %s (lyrics_words.py), or fix the words, then run this again." % a.words)
+print("\nnext: the audit has no ERROR; the words under CHECK / WARN above are the ones to look at on lyrics/zoom_*.jpg "
+      "(`word@beat` fixes one), then $PY timeline.py and a few stills")

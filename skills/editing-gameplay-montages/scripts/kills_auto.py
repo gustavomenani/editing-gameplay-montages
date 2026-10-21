@@ -22,9 +22,12 @@ What it does for each clip
      the ammo digits change (mykills.py's rule). Candidates are scored by how many of the three agree; the best wins.
      With several shots in the window (a spray) the one nearest the usual feed latency (lag.typical) is taken.
   3. OUTPUT.
-       kills.json       {id: {clip, K, feed, conf, method, changes, ...}}: K = shot frame (flash visible on K, absent on
+       kills.json       {id: {clip, K, feed, conf, method, how, verified, game, changes, ...}}: K = shot frame (flash visible on K, absent on
                         K-1), feed = first frame of the row appearing, conf = high | medium | low | guess,
                         method = the signals that agreed (ammo, flash, audio) or "feed-lag" for a pure guess,
+                        how = "ammo" | "flash" (K sits on a measured ammo step / muzzle flash) | "guess" (K = feed - lag),
+                        verified = how is ammo / flash AND conf is not low / guess: the drafters' rule (preflight.k_check) refuses
+                        an unverified K unless the plan entry says "k_checked": true; look at it with kverify.py,
                         changes = earlier shots (ammo/flash frames) in the 30 frames before K (flick.py reads it).
                         Runs replace the entries of the clips they process and keep the others.
        autokill_NN.jpg  review sheets, 5 kills per sheet. Per row: the feed at the event | weapon zoom K-1, K, K+1 |
@@ -505,7 +508,8 @@ def find_shot(clip, ev, prof, onsets):
             K, au, method, conf = gk, atyp, "feed-lag+audio", "low"
         else:
             K, au, method, conf = gk, None, "feed-lag", "guess"
-    res = {"K": int(K), "feed": int(feed), "conf": conf, "method": method,
+    how = "ammo" if best and "ammo" in best["kinds"] else "flash" if best else "guess"      # ammo / flash = K measured on the picture (verified), guess = feed - lag
+    res = {"K": int(K), "feed": int(feed), "conf": conf, "method": method, "how": how, "verified": how != "guess" and conf not in ("low", "guess"),     # the drafters' rule (preflight.k_check)
             "audio_after_K": None if au is None else round(float(au), 2), "audio_strength": None if astr is None else round(float(astr), 1),
             "changes": [int(f) for f in all_shots if K - 30 <= f < K]}
     if not best and no_shot:
@@ -822,6 +826,7 @@ def main():
     for c in clips:
         found, other[c] = analyze(c, prof)
         for ev, k in found:
+            k["game"] = prof["_name"]                     # the profile the K was measured with: gate.py's kverify check re-measures with the same one
             kills[str(nxt)] = k
             evs.append((str(nxt), k, ev))
             nxt += 1

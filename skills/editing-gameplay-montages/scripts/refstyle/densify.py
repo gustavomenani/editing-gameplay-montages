@@ -12,6 +12,9 @@ import cv2
 import rifeutil
 import frame
 T = preflight.timeline()
+if getattr(T, "SYNC", 0) < 2:
+    sys.exit("densify.py: timeline.py has no SYNC = 2 (it predates the frame-exact timing contract): copy the timing block of "
+             "scripts/refstyle/timeline_ref_example.py into it, or redraft it with draft_ref_timeline.py.")
 
 if len(sys.argv) != 4 or sys.argv[1] not in ("plan", "run"):
     sys.exit("usage: python densify.py plan 12 28   (prints the plan)   or   python densify.py run 12 28   (builds it)\n"
@@ -33,8 +36,7 @@ used = {}
 h = 0.5 / T.FPB / 2
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
-    a, b, p, tin = T.active(r)
-    for i in ([a] if b is None else [a, b]):
+    for i in [T.take_of(n)]:                         # the take on screen, chosen by frame index (render.py)
         s = T.SEGS[i]
         p0, p1 = float(s["map"](r - h)[0]), float(s["map"](r + h)[0])
         v = float(s["map"](r)[1])

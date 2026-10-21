@@ -50,14 +50,20 @@ while [ $left -gt 0 ]; do
 done
 T1=$SECONDS
 for i in 0 1 2; do [ -s part_$i.mp4 ] || { tail_log part_$i.log; fail "part_$i.mp4 was not written"; }; done
-printf "file 'part_0.mp4'\nfile 'part_1.mp4'\nfile 'part_2.mp4'\n" > parts.txt
+# parts.txt gives every part its EXACT duration (frames / 60 s): the mp4 muxer stores a part's duration in whole milliseconds and
+# sometimes rounds it down (a part of 554 frames = 9.2333 s stored as 9.233 s), and the concat demuxer starts the next part at the
+# stored duration, so the next part started 0.33 ms (5 ticks) early and every later frame was early against the sound.
+"$PY" -c "S=[0,$A,$B]; E=[$A,$B,$N]; open('parts.txt','w').write(''.join(\"file 'part_%d.mp4'\nduration %.9f\n\" % (i, (E[i]-S[i])/60) for i in range(3)))" || fail "could not write parts.txt"
 "$FF" -v error -y -f concat -safe 0 -i parts.txt -c copy video.mp4 || fail "joining the three parts failed (ffmpeg's message is above)"
+# the picture's time lattice: every video pts step exactly 1/60 s and N frames, or the render stops here, naming the join
+"$PY" ff.py pts video.mp4 "$N" "$A" "$B" || fail "the joined video.mp4 does not have exactly $N frames 1/60 s apart (above: the step and the join it sits on). Render again; if it repeats, run  $FF -i part_0.mp4  and look at each part's duration"
 "$PY" audio.py > audio.log 2>&1 || { tail_log audio.log; fail "audio.py failed: the log above says why (the song must cover the video: python preflight.py checks it)"; }
 # mix.wav is written at audio.HEADROOM (T.HEADROOM in timeline.py, default 0.8): audio.master_chain() gives the level back
-# (volume = 1.18 / HEADROOM: 1.475 at 0.8, 2.36 at 0.5), band-limits if the timeline asks (MASTER_LOWPASS), limits at 0.82,
-# trims (MASTER_TRIM_DB). deliver.sh and peakguard.py use the same chain.
+# (volume = 1.18 / HEADROOM: 1.475 at 0.8, 2.36 at 0.5), band-limits if the timeline asks (MASTER_LOWPASS), limits at 0.82
+# (alimiter ... latency=1: without it the limiter's look-ahead delays the whole sound by 143 samples = 2.979 ms), trims (MASTER_TRIM_DB).
+# deliver.sh and peakguard.py use the same chain.
 AF=$("$PY" -c "import audio; print(audio.master_chain())" | tr -d '\r' | tail -n 1)
-case "$AF" in volume=*) ;; *) fail "could not read the sound chain from audio.py (audio.master_chain()): run  $PY -c 'import audio; print(audio.master_chain())'  to see why";; esac
+case "$AF" in volume=*latency=1*) ;; *) fail "could not read the sound chain from audio.py (audio.master_chain()): run  $PY -c 'import audio; print(audio.master_chain())'  to see why";; esac
 # -aac_pns 0 etc.: ffmpeg's AAC encoder otherwise overshoots the limiter by up to 3 dB on kick transients (clipping)
 # written under a temporary name: a mux that fails never leaves a half file under the master's name
 "$FF" -v error -y -i video.mp4 -i mix.wav -af "$AF" \

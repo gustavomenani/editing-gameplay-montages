@@ -7,15 +7,21 @@ usage (from the project folder, with the project's Python):
                                                  is waived silently. An unknown code is refused (a typo must not waive anything).
     python gate.py master.mp4 --json             the list as JSON on stdout (nothing else is printed)
     python gate.py master.mp4 --no-pixels        skip the checks that decode the master and the clips (timeline, file, sound and audio report only)
+    python gate.py master.mp4 --deep             also render about 10 frames again with render.py (the part joins, some cuts) and compare them with the master (1-2 minutes)
+    python gate.py master.mp4 --table            also print the sync audit's table (per event: expected frame / measured frame / ms)
+    python gate.py --sync-only VIDEO             ONLY the sync audit of one file, which may be the UPLOAD COPY without the master next to it (deliver.sh runs it on the file that leaves,
+                                                 after peakguard): container + pts, the sound against the song, every cut / shot / flash / accent / word frame. Needs timeline.py, src/ and
+                                                 the song of the project in the folder. Prints the table and the findings; exit 0 = no ERROR left (WARNs pass), 1 = an ERROR, 2 = bad call
     python gate.py --codes                       every code, its usual severity and what it means
 
-From Python:  gate.run(video, accept=(), pixels=True) -> list of dicts {severity: "ERROR" | "WARN" | "ACCEPTED", code, where, msg, fix}
+From Python:  gate.run(video, accept=(), pixels=True, log=None, table=None) -> list of dicts {severity: "ERROR" | "WARN" | "ACCEPTED", code, where, msg, fix}; gate.run_sync_only(video, table=None) -> the same for --sync-only
               gate.errors(items) -> the ERRORs left.   Every check is measured (time maps, ffprobe, the decoded master, audio_report.json written by
               audio.py, kill_rank.py): what cannot be measured in a project is reported as a WARN "... unverified", never skipped in silence, and a check that
               crashes is an ERROR (code check-failed, not waivable): a doubtful result is flagged, never passed.
 
 What it checks
-  timeline     preflight.check (clips, anchors, music, FADE_OUT ...) and preflight.fast_forward (MAX_SPEED: runs of frames faster than real time; backwards)
+  timeline     SYNC = 2 (an older timeline.py is refused: ERROR timeline-old, never waived, the message says how to update), then preflight.check (clips, anchors, music, FADE_OUT ...) and
+               preflight.fast_forward (MAX_SPEED: runs of frames faster than real time; backwards)
   the file     exists, video stream, size of the frame (1080x1920 / 1920x1080), 60 fps, frame count and duration of the timeline, audio stream at 48 kHz,
                audio as long as the picture; a master older than timeline.py (WARN)
   picture      check.py's measures on the master: frames identical to the previous one outside fades (ERROR), one-frame stalls (ERROR; the one frame
@@ -24,11 +30,16 @@ What it checks
   sound        decoded peak above -0.5 dBFS (ERROR: peakguard.py should have fixed it), loudness outside -14 .. -7 LUFS (WARN)
   audio.py     audio_report.json: made for this timeline.py (else ERROR audio-stale: deliver.sh encodes mix.wav), every kill has a gunshot unless mute=True
                (ERROR in the reference style), mix.wav not clipped and as long as the picture, gunshots placed with an offset that was not measured (WARN)
-  kills        kill_rank.check_timeline: hidden, not the player's, duplicated footage, K not the killing shot (ERROR); no kills.json: WARN
-  lyrics       with lyrics.txt and lyric_cues.json: a word on screen that is not in the lyrics (ERROR)"""
+  kills        kill_rank.check_timeline: hidden, not the player's, duplicated footage, K not the killing shot (ERROR); no kills.json: WARN; kverify.py: K re-measured on the pictures
+               (ammo step / muzzle flash on K, none on K-1): a corrected or suspect K is ERROR kill-frame, not measurable WARN (not in --sync-only: it needs src/ and pts/)
+  lyrics       with lyrics.txt and lyric_cues.json: a word on screen that is not in the lyrics (ERROR)
+  sync audit   syncaudit.py, independent of the render's and the mixer's own bookkeeping (read its docstring): the file's pts lattice (pts-gap), the sound against the SONG (av-offset > 1 ms, av-drift),
+               every cut on nearest_frame (cut-frame) and on the music (cut-grid), the kills on measured attacks of the song (kill-hit), the gunshots on their hits (kill-audio: WARN from 2 ms, ERROR beyond 4 ms), the muzzle flash
+               and every accent of a kill on the shot frame (kill-flash, fx-frame), bumps (bump-frame), words (word-frame), the grid phase (grid-phase); lyrics_audit.py (refstyle, run by this gate): every lyric cue start against the sung attack (word-sung). NOT waivable: av-offset, av-drift,
+               frame-count, cut-frame, pts-gap (and timeline-old, check-failed); the other sync codes take ACCEPT like any code"""
 import argparse, contextlib, datetime, io, json, os, re, subprocess, sys, time, unicodedata, wave
 import preflight                                  # a clear message when this is not the project's Python
-import numpy as np
+import syncaudit
 
 # code -> (usual severity, what it means). --accept only takes these; check-failed is deliberately not in the list.
 CODES = {
@@ -65,7 +76,6 @@ CODES = {
     "audio-unverified": ("WARN", "no audio_report.json: audio.py was not run with this version"),
     "audio-stale": ("ERROR", "mix.wav / audio_report.json were made for another timeline.py"),
     "no-gunshot": ("ERROR", "a kill has no gunshot and is not mute=True"),
-    "gunshot-unmeasured": ("WARN", "gunshots placed with an offset that was not measured"),
     "mix-clip": ("ERROR", "mix.wav is clipped"),
     "mix-length": ("ERROR", "mix.wav is not as long as the picture"),
     "kills-unverified": ("WARN", "kill_rank.py is not in this project: kills not verified"),
@@ -76,8 +86,37 @@ CODES = {
     "unverified": ("WARN", "no kill row follows K (kill_rank.py)"),
     "weak-shot": ("WARN", "K comes from a kill without a shot signal (kill_rank.py)"),
     "no-kills": ("WARN", "no kills.json: kills not verified (kill_rank.py)"),
+    "kill-frame": ("ERROR", "kverify.py: K of a kill is not the first frame of its shot (CORRECT to another sure K, or SUSPECT): the flash sits a frame off its hit; waive only with ACCEPT"),
+    "kill-frame-unmeasured": ("WARN", "kverify.py could not measure K of a kill (replay camera, weapon hidden): K rests on whoever chose it"),
     "lyrics-word": ("ERROR", "a word on screen is not in lyrics.txt"),
+    # the sync audit (syncaudit.py): the finished file against the timeline and the REAL song. NOT waivable: timeline-old, av-offset, av-drift, frame-count, cut-frame, pts-gap
+    "timeline-old": ("ERROR", "timeline.py has no SYNC = 2: it is from the old pipeline (ceil cuts, beat-domain accents); update the project, never waived"),
+    "pts-gap": ("ERROR", "the video's timestamps leave the 1/60 s lattice (WARN below 1 ms, ERROR above: a bad part join, a dropped or repeated frame), never waived"),
+    "av-offset": ("ERROR", "the sound sits more than 1 ms from the song at the timeline's place (WARN above 0.25 ms), never waived"),
+    "av-drift": ("ERROR", "the sound's offset to the song moves by more than 1 ms inside the video (the audio runs at another tempo), never waived"),
+    "audio-unmatched": ("ERROR", "the decoded audio does not contain the song section the timeline says"),
+    "cut-frame": ("ERROR", "a take's picture starts on another frame than nearest_frame(its cut beat): a dropped or repeated frame, or a late take, never waived"),
+    "cut-late": ("ERROR", "legacy diagnosis only: a cut on ceil(x) instead of the nearest frame"),
+    "cut-grid": ("ERROR", "a cut more than half a frame from every lattice line and measured attack of the song (WARN up to 2 frames)"),
+    "kill-hit": ("ERROR", "a kill's musical beat is more than a frame from every measured attack of the song (WARN when not exactly on one)"),
+    "kill-audio": ("ERROR", "a gunshot starts more than 4 ms from the musical hit although audio.py placed it on its measured onset (WARN from 2 ms; WARN above 8.3 ms for the others)"),
+    "fx-frame": ("ERROR", "an accent of a kill (exposure pop, inverted frame, burst) is not on the shot's frame"),
+    "kill-flash": ("ERROR", "the muzzle flash is not on the shot's frame (found by matching the source's flash image; WARN when it is also on the frame before)"),
+    "flash-unmeasured": ("WARN", "the muzzle flash could not be found for half of the kills: not verified"),
+    "render-mismatch": ("ERROR", "--deep: a frame of the file matches a fresh render of the timeline best at another frame (a dropped / repeated frame, a shifted part)"),
+    "cut-unmeasured": ("WARN", "a hard cut could not be found within +-8 frames of its expected frame (no clear layout change): not verified"),
+    "gunshot-unmeasured": ("WARN", "gunshots that could not be found in the master (or placed with an offset that was not measured): not verified"),
+    "kill-audio-double": ("WARN", "the placed gunshot is on its hit but a louder attack follows it (two attacks in the clip's shot): listen"),
+    "bump-unmeasured": ("WARN", "bumps / pulses that could not be measured (luma ramp, cut or kill accents near, no clear pop): not verified"),
+    "fx-unmeasured": ("WARN", "kills whose exposure pop / inverted frame could not be measured: not verified"),
+    "bump-frame": ("ERROR", "a bump pops on another frame than nearest_frame(beat) - HIT_LEAD"),
+    "word-frame": ("ERROR", "a word first shows on another frame than nearest_frame(cue) - HIT_LEAD"),
+    "word-sung": ("ERROR", "a lyric cue starts more than 25 ms from a confident sung attack of the voice stem and no flag explains it (lyrics_audit.py; WARN for flagged words)"),
+    "word-unverified": ("WARN", "lyric_cues.json without the voice stem / lyrics_audit.py: the cue starts are not verified against the singing"),
+    "grid-phase": ("ERROR", "the song's strong hits agree and sit more than 25 ms from the timeline's BEAT0 / BPM grid"),
+    "grid-unmeasured": ("WARN", "the song's hits do not agree on one grid phase: the grid is not verified"),
 }
+NONWAIVABLE = ("check-failed",) + ("timeline-old",) + syncaudit.NONWAIVABLE      # the codes --accept / ACCEPT never waive
 
 
 def item(sev, code, where, msg, fix=""):
@@ -201,14 +240,13 @@ def check_picture(T, video, pixels_log):
             res = check.analyze(video, T, strips=False)
     except check.Stop as e:
         return [item("ERROR", "bad-video", video, str(e), "pass the master that run.sh made")], None
-    R0, F = T.R0, T.FPB
     if res["exact"]:
         out.append(item("ERROR", "frozen-frame", "output frames " + _frames_text(res["exact"]),
                         "%d frame(s) identical to the previous one outside the fades (a duplicated source frame, a hole in the store)" % len(res["exact"]),
                         "python check.py %s names the clip and source frame; a duplicate: python repair.py; a store gap: python check_store.py, densify.py" % video))
     first = {}
     for j in range(1, len(T.SEGS)):
-        first[int(np.ceil((T.SEGS[j]["r0"] - R0) * F - 1e-9))] = j
+        first[T.nearest_frame(T.SEGS[j]["r0"])] = j
     real, cutting = [], []
     for n, v, nb in res["stalls"]:
         if n in res["exact"]:                                     # already reported as a frozen frame
@@ -279,7 +317,7 @@ def check_alignment(T, video):
                         "the picture is shifted against the timeline: render the master again, python check_store.py, python posmap.py"))
     if late:
         out.append(item("WARN", "kill-sync-late", "beats " + ", ".join("%g" % a["beat"] for a in late[:8]),
-                        "the picture sits one frame off the timeline at %d kill(s) (the shutter blur allows it; the sync_N.jpg strips show the flash)" % len(late),
+                        "the picture's source sits one frame off the timeline at %d kill(s) (this band correlation cannot always tell one frame; the sync audit's flash / cut-frame lines are the exact test)" % len(late),
                         "python check.py %s and look at sync_N.jpg for these kills" % video))
     if al and len(meas) < len(al) / 2:
         out.append(item("WARN", "sync-unmeasured", "kill sync", "%d of %d kills sit on a flat picture (black / one colour): nothing to match" % (len(al) - len(meas), len(al)),
@@ -346,6 +384,85 @@ def check_kills(T):
     return out
 
 
+def check_lyric_audit(T):
+    """lyrics_audit.py (refstyle): every cue start of lyric_cues.json against the sung ATTACK measured on the voice stem (25 ms). Run as the script it is, in the project folder.
+    Exit 1 = a cue that is not on an attack and not flagged (ERROR word-sung); its WARN block (flagged / no attack) is a WARN word-sung."""
+    if not os.path.isfile("lyric_cues.json"):
+        return []
+    if not (os.path.isfile("lyrics_audit.py") and os.path.isfile(os.path.join("lyrics", "vocals.wav"))):
+        return [item("WARN", "word-unverified", "lyric_cues.json", "the cue starts were not checked against the singing: %s" % (
+            "lyrics_audit.py is not in this folder" if not os.path.isfile("lyrics_audit.py") else "lyrics/vocals.wav is missing (lyrics_stem.py makes it)"),
+                     "python lyrics_stem.py, then python lyrics_audit.py")]
+    r = subprocess.run([sys.executable, "lyrics_audit.py"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = []
+    blocks = {}
+    cur = None
+    for line in (r.stdout or "").splitlines():
+        m = re.match(r"(ERROR|WARN) \((\d+)\)", line)
+        if m:
+            cur = m.group(1)
+            blocks[cur] = [line]
+        elif cur and line.startswith("  "):
+            blocks[cur].append(line.strip())
+        elif cur:
+            cur = None
+    if r.returncode not in (0, 1) or (r.returncode == 1 and "ERROR" not in blocks):
+        return [item("ERROR", "check-failed", "lyrics_audit.py", "lyrics_audit.py failed: %s" % ((r.stderr or r.stdout).strip().splitlines() or ["no output"])[-1][:300], "run python lyrics_audit.py and read its message")]
+    for sev in ("ERROR", "WARN"):
+        if sev in blocks:
+            out.append(item(sev, "word-sung", "lyric_cues.json", " | ".join(blocks[sev][:7]) + (" ..." if len(blocks[sev]) > 7 else ""),
+                            "python lyrics_audit.py shows the table; python lyrics_sync.py again, or `word@beat` in lyrics.txt pins a word"))
+    return out
+
+
+def kverify_game(T):
+    """The game profile kverify.py needs (games/<name>.json): T.GAME, else the one profile every kills.json entry was measured with
+    (kills_auto.py writes "game"), else the KVERIFY_GAME environment variable, else valorant (the default; said in the output).
+    Not clips.json: ingest.py reads every key there as a clip."""
+    g = getattr(T, "GAME", None)
+    if not g and os.path.isfile("kills.json"):
+        try:
+            games = {e.get("game") for e in json.load(open("kills.json", encoding="utf-8-sig")).values() if isinstance(e, dict)} - {None}
+            g = games.pop() if len(games) == 1 else None
+        except (ValueError, AttributeError):
+            g = None
+    return g or os.environ.get("KVERIFY_GAME") or "valorant"
+
+
+def check_kverify(T):
+    """kverify.py (Kills): re-measures every kill's K on the clips' pictures (the ammo-counter step / muzzle flash on K, none on K-1); K = the time map at the shot beat. Needs src/ and pts/, not the
+    master. CORRECT (another sure K) and SUSPECT -> ERROR kill-frame (the flash would sit a frame off its hit); not measurable -> WARN. The per-kill verdict lines are in the messages. The game profile
+    is kverify_game(T) (passed as --game). kverify.py missing: WARN kills-unverified."""
+    if not os.path.isfile("kverify.py"):
+        return [item("WARN", "kills-unverified", "kverify.py", "kverify.py is not in this project: the K of every kill (the muzzle-flash frame the picture and the sound hang on) was not re-measured on the pictures",
+                     "copy scripts/kverify.py and scripts/games/ into the project and run python kverify.py timeline.py")]
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        prefix = os.path.join(td, "kv")
+        r = subprocess.run([sys.executable, "kverify.py", "timeline.py", "--no-sheets", "--out", prefix, "--game", kverify_game(T)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        try:
+            res = json.load(open(prefix + ".json", encoding="utf-8"))
+        except (OSError, ValueError):
+            if "SYNC" in (r.stderr or ""):
+                return [item("ERROR", "timeline-old", "timeline.py", (r.stderr or "").strip()[-600:], "")]
+            return [item("ERROR", "check-failed", "kverify.py", "kverify.py (profile %s) failed: %s" % (kverify_game(T), ((r.stderr or r.stdout).strip().splitlines() or ["no output"])[-1][:300]),
+                         "run python kverify.py timeline.py --game %s and read its message" % kverify_game(T))]
+    lines = [l.rstrip() for l in (r.stdout or "").splitlines() if l.startswith(tuple(res)) or " CORRECT " in l or " SUSPECT " in l or "not measurable" in l]
+    bad = [(t, v) for t, v in res.items() if v["verdict"] in ("correct", "suspect")]
+    unm = [(t, v) for t, v in res.items() if v["verdict"] == "unmeasurable"]
+    out = []
+    if bad:
+        out.append(item("ERROR", "kill-frame", "kills " + ", ".join("%s%s" % (t, " -> K %d" % v["K_sure"] if v.get("K_sure") else "") for t, v in bad[:10]),
+                        "%d of %d kill(s): K is not the first frame of the shot (the flash would sit a frame off its hit). Verdict lines: %s" % (
+                            len(bad), len(res), " | ".join(l for l in lines if " CORRECT " in l or " SUSPECT " in l)[:700]),
+                        "move the anchor to the sure K (kverify.py --update for kills.json, then draft again); read the kv_NN.jpg sheets (python kverify.py timeline.py)"))
+    if unm:
+        out.append(item("WARN", "kill-frame-unmeasured", "kills " + ", ".join(t for t, _ in unm[:10]),
+                        "%d kill(s) could not be measured by kverify.py (replay camera, weapon hidden, counter off screen): K rests on whoever chose it" % len(unm),
+                        "python kverify.py timeline.py and read the sheets"))
+    return out
+
+
 def _tokens(text):
     t = unicodedata.normalize("NFC", text).upper()
     return [w for w in re.split(r"[^\w']+", t) if w]
@@ -367,14 +484,47 @@ def check_lyrics(T):
                  "fix lyrics.txt (the confirmed lyrics), then run lyrics_sync.py; or --accept lyrics-word if the text is intended")]
 
 
+# ---------------------------------------------------------------------------------------------------------------- the sync audit
+def old_timeline_message(T):
+    """preflight.sync_update_message (it names both styles' templates) + the diagnosis-only option"""
+    return preflight.sync_update_message(getattr(T, "SYNC", 0)) + ". To measure an OLD master for diagnosis only: python syncaudit.py master.mp4 --legacy"
+
+
+def old_timeline(T):
+    return int(getattr(T, "SYNC", 0)) < 2
+
+
+def check_sync(T, video, log, picture=True, count_check=False, deep=False):
+    """The independent end-to-end audit (syncaudit.py) of the finished file -> items; its printed table goes to log (an object with write())."""
+    return syncaudit.audit(video, T, out=lambda s: log.write(s + "\n"), count_check=count_check, picture=picture, summary=False, deep=deep)
+
+
+def run_sync_only(video, table=None, deep=False):
+    """gate.py --sync-only: the sync audit of ONE file, usable on the upload copy without the master (container, audio against the song, cut frames, shot frames, flash, accents, words) -> items."""
+    table = table if table is not None else io.StringIO()
+    T, err = preflight.load()
+    if err:
+        return [item("ERROR", "timeline-load", "timeline.py", err, "fix timeline.py (python timeline.py shows the line)")]
+    if old_timeline(T):
+        return [item("ERROR", "timeline-old", "timeline.py", old_timeline_message(T), "")]
+    if not os.path.isfile(video):
+        return [item("ERROR", "no-master", video, "%s does not exist in %s" % (video, os.getcwd()), "")]
+    try:
+        return check_sync(T, video, table, picture=True, count_check=True, deep=deep)
+    except Exception as e:
+        return [item("ERROR", "check-failed", "sync", "the check crashed: %s: %s" % (type(e).__name__, e), "tell the maintainer; do not deliver on a doubt")]
+
+
 # ---------------------------------------------------------------------------------------------------------------- the gate
-def run(video, accept=(), pixels=True, log=None):
-    """All the checks -> list of items. accept: codes whose ERRORs are waived (severity becomes ACCEPTED). log: where check.py's own report goes."""
+def run(video, accept=(), pixels=True, log=None, table=None, deep=False):
+    """All the checks -> list of items. accept: codes whose ERRORs are waived (severity becomes ACCEPTED). log: where check.py's own report goes; table: where the sync audit's table goes."""
     items = []
     log = log or io.StringIO()
     T, err = preflight.load()
     if err:
         return [item("ERROR", "timeline-load", "timeline.py", err, "fix timeline.py (python timeline.py shows the line)")]
+    if old_timeline(T):                                              # clean cutover: no silent fallback to the old rules
+        return [item("ERROR", "timeline-old", "timeline.py", old_timeline_message(T), "")]
 
     def part(name, fn, *a):
         try:
@@ -400,13 +550,23 @@ def run(video, accept=(), pixels=True, log=None):
     elif pixels and not usable:
         items.append(item("WARN", "picture-unchecked", "picture", "the picture checks (frozen frames, stalls, kill sync, sound) were not run: the file above is unusable", "fix the file first"))
     items += part("audio", check_audio_report, T)
+    if not any(i["code"] in ("no-master", "bad-video") for i in fl):
+        items += part("sync audit", check_sync, T, video, table if table is not None else io.StringIO(), pixels and usable, False, deep)
     items += part("kills", check_kills, T)
+    if pixels:                                                       # needs src/ and pts/ (not the master); never in --sync-only
+        items += part("kverify", check_kverify, T)
     items += part("lyrics", check_lyrics, T)
+    items += part("lyric cues", check_lyric_audit, T)
+    waive(items, accept)
+    return items
+
+
+def waive(items, accept):
+    """The ERRORs of the codes in `accept` become ACCEPTED, except the codes that are never waived (NONWAIVABLE: a crashed check, an old timeline, the sound / frame / pts errors of the sync audit)."""
     acc = set(accept)
     for i in items:
-        if i["severity"] == "ERROR" and i["code"] in acc and i["code"] != "check-failed":
+        if i["severity"] == "ERROR" and i["code"] in acc and i["code"] not in NONWAIVABLE:
             i["severity"] = "ACCEPTED"
-    return items
 
 
 def note_accepted(items, video):
@@ -430,6 +590,9 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="print the list as JSON and nothing else")
     ap.add_argument("--no-pixels", action="store_true", help="skip the checks that decode the master and the clips")
     ap.add_argument("--codes", action="store_true", help="list every code")
+    ap.add_argument("--sync-only", action="store_true", help="only the sync audit of this ONE file (container, sound against the song, cut / shot / flash / accent frames, words): the upload copy, no master needed")
+    ap.add_argument("--deep", action="store_true", help="also render about 10 frames again with render.py (part joins, some cuts) and compare them with the file (1-2 minutes more)")
+    ap.add_argument("--table", action="store_true", help="also print the sync audit's table (per event: expected / measured frame and ms)")
     a = ap.parse_args(argv)
     if a.codes:
         for c, (s, d) in CODES.items():
@@ -442,15 +605,25 @@ def main(argv=None):
     if unknown:
         print("gate.py: unknown code(s) in --accept / ACCEPT: %s. Nothing was waived. Codes: python gate.py --codes" % ", ".join(unknown), file=sys.stderr)
         return 2
+    never = [c for c in accept if c in NONWAIVABLE]
+    if never:
+        print("gate.py: %s cannot be waived (a wrong sound offset, drift, frame count, cut frame or timestamp is never what the user asked for; an old timeline cannot be checked). Fix the file." % ", ".join(never), file=sys.stderr)
+        return 2
     t0 = time.time()
-    log = io.StringIO()
-    items = run(a.video, accept, not a.no_pixels, log)
+    log, table = io.StringIO(), io.StringIO()
+    if a.sync_only:
+        items = run_sync_only(a.video, table, a.deep)
+        waive(items, accept)
+    else:
+        items = run(a.video, accept, not a.no_pixels, log, table, a.deep)
     left = errors(items)
-    if not left:                                      # the waivers are recorded only when the delivery goes ahead
+    if not left and not a.sync_only:                  # the waivers are recorded only when the delivery goes ahead (the upload copy repeats the master's waivers)
         note_accepted(items, a.video)
     if a.json:
         print(json.dumps(items, indent=1, ensure_ascii=False))
         return 1 if left else 0
+    if (a.sync_only or a.table) and table.getvalue():
+        print(table.getvalue())
     order = {"ERROR": 0, "ACCEPTED": 1, "WARN": 2}
     for i in sorted(items, key=lambda x: order[x["severity"]]):
         print("%-8s %-18s %s" % (i["severity"], i["code"], i["where"]))

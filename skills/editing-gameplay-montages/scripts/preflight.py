@@ -9,7 +9,14 @@ timeline.py checks (all problems are listed at once, not only the first):
   BOOMS, LUMA_IN, sound levels, IMPACT / ACC, segment white / shot_from) have the right shape and lie inside the video; every clip of the
   segments exists in src/ and has its pts/ table; anchor beats AND source frames strictly increasing; every kill inside its segment
   and inside its clip; segments follow each other; FADE_OUT inside the video; with music=True the song covers R0..R1
-  (the one place that knows how long it is)."""
+  (the one place that knows how long it is).
+
+The timing contract (SYNC = 2; a timeline.py without it is refused with the way to update it):
+  grid identities   FPS == 60, PER == 60 / BPM, FPB == FPS * PER, MUSIC_T0 == BEAT0 + (M0 + R0) * PER, N_FRAMES == round((R1 - R0) * FPB): audio.py reads
+                    MUSIC_T0 / PER, render.py FPB / R0, the entries BEAT0 / M0: one that disagrees desyncs picture and sound silently
+  exact frames      every cut (a segment's first anchor) and every shot (a kill's beat) lies on a whole output frame (the SEGS loop places them with vis())
+  hits              HITS exists, every segment's s["hits"] holds one musical beat per kill (the measured attack), each inside its take and shown on
+                    vis(hit, HIT_LEAD)"""
 import difflib, glob, importlib, os, subprocess, sys, traceback, warnings
 
 HOW = ("this is not the project's Python. Run the scripts with the venv from pipeline.md Setup (PY=./venv311/Scripts/python), "
@@ -23,6 +30,49 @@ for _m in ("numpy", "cv2"):
         importlib.import_module(_m)
     except ImportError as _e:
         sys.exit(f"{sys.executable} cannot import '{_m}' ({_e}).\n{HOW}")
+
+
+K_HELP = ("run `python kverify.py plan.json` (it measures the ammo step and the muzzle flash on the pictures: sheets kv_NN.jpg), fix K from its verdict "
+          "(or `kverify.py kills.json --update`), then set \"k_checked\": true on the plan entry")
+
+
+def kills_db():
+    """kills.json of the project folder as a dict ({} when it is absent or unreadable): the one loader of both drafters' K rule"""
+    import json
+    try:
+        d = json.load(open("kills.json", encoding="utf-8-sig"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def k_check(db, k):
+    """The K rule of both drafters (a K one frame off is 16.7 ms of desync between the shot and the drum). k = {"clip", "K"} and
+    optionally "id" (K = the PLAN's K). -> the reason this K is unverified, or None when kills.json verifies it. Unverified (refused unless the plan entry says
+    "k_checked": true): no kills.json; no entry (by id, else clip + K, also the K that kverify.py corrected: "K_was"); the plan's K differs from the entry's;
+    the entry's how is not "ammo" / "flash" (ammo-loose, guess, none: an old entry); its conf is "low" / "guess"."""
+    if not db:
+        return "there is no kills.json in this folder, so nothing verifies this K"
+    kid, entry = k.get("id"), None
+    if kid is not None:
+        entry = db.get(str(kid))
+    else:
+        for i_, e in db.items():
+            if e.get("clip") == k["clip"] and k["K"] in (e.get("K"), e.get("K_was")):
+                kid, entry = i_, e
+                break
+    if entry is None:
+        return "kills.json has no entry for %s K=%s (nothing verifies it)" % (k["clip"], k["K"])
+    if entry.get("K") != k["K"]:
+        if entry.get("K_was") == k["K"]:
+            return "kills.json id %s: kverify.py corrected this K (%s) to %s" % (kid, k["K"], entry.get("K"))
+        return "the plan's K = %s differs from kills.json id %s (K = %s)" % (k["K"], kid, entry.get("K"))
+    how, conf = entry.get("how"), entry.get("conf")
+    if how in ("ammo", "flash") and conf not in ("low", "guess"):
+        return None
+    if how is None:
+        return 'kills.json id %s has no "how" (an old or hand-written entry), conf = %r' % (kid, conf)
+    return "kills.json id %s: how = %r, conf = %r" % (kid, how, conf)
 
 
 def duration(path):
@@ -67,7 +117,7 @@ def frame_speeds(T):
     N = int(T.N_FRAMES)
     r = T.R0 + np.arange(N) / T.FPB
     ends = np.array([s["a"][-1][0] for s in T.SEGS])
-    seg = np.minimum(np.searchsorted(ends, r, side="right"), len(T.SEGS) - 1)
+    seg = np.minimum(np.searchsorted(ends - 0.25 / T.FPB, r, side="right"), len(T.SEGS) - 1)       # a take starts on the frame whose beat is its first anchor (an exact frame: no float compare)
     sp = np.zeros(N)
     for i, s in enumerate(T.SEGS):
         m = seg == i
@@ -239,12 +289,100 @@ def fx_problems(T):
     return E
 
 
+SYNC_NEEDED = 2
+FRAME_TOL = 1e-3                                           # frames: a cut / shot beat further from a whole output frame than this is off the frame grid
+
+
+def sync_update_message(sync):
+    """the one sentence a timeline.py without the timing contract (SYNC = 2) gets"""
+    have = "has no SYNC constant" if not sync else f"has SYNC = {sync!r}"
+    return (f"timeline.py {have}, this skill version needs SYNC = {SYNC_NEEDED}: its old timing placed events on grid beats and showed them on the first frame at or "
+            "after the beat (0 to 16.7 ms late, sound and picture apart). The new contract puts every picture event on an exact output frame and every sound on the measured "
+            "hit. Update: copy the SYNC = 2 block (`hit(t)`, `frame_beat(n)`, `nearest_frame(r)`, `vis(r, lead)`, `SYNC = 2`), `CUT_LEAD` / `HIT_LEAD` in the cut block, "
+            "the SEGS loop (s[\"m0\"], s[\"hits\"], KILLS / HITS, take_of) and the entries' musical beats from scripts/refstyle/timeline_ref_example.py (house style: "
+            "scripts/timeline_example.py) into timeline.py, write each kill / cut / bump / boom / riser end as `hit(t)` of its measured attack (music_hits.py writes hits.json), "
+            "or draft a new one with draft_ref_timeline.py / draft_timeline.py")
+
+
+def grid_problems(T):
+    """The grid constants of timeline.py must agree: audio.py reads MUSIC_T0 / PER, render.py reads FPB / R0, the entries read BEAT0 / M0 / PER. A constant that
+    disagrees (an FPB typed with 29.0 for 29.032, a BEAT0 changed without MUSIC_T0) desyncs picture and sound silently by up to dozens of ms: -> problems"""
+    E = []
+    if T.FPS != 60:
+        E.append(f"FPS = {T.FPS!r} must be 60 (the clips and the output run at 60 fps; render.py and the frame math assume it)")
+    if abs(T.PER - 60.0 / T.BPM) > 1e-9:
+        E.append(f"PER = {T.PER!r} is not 60.0 / BPM = {60.0 / T.BPM!r} (BPM = {T.BPM!r}): write PER = 60.0 / BPM")
+    if abs(T.FPB - T.FPS * T.PER) > 1e-9:
+        E.append(f"FPB = {T.FPB!r} is not FPS * PER = {T.FPS * T.PER!r}: the picture would drift {abs(T.FPB - T.FPS * T.PER) * (T.R1 - T.R0) / 60 * 1000:.1f} ms by the end; write FPB = FPS * PER")
+    t0 = T.BEAT0 + (T.M0 + T.R0) * T.PER
+    if abs(T.MUSIC_T0 - t0) > 1e-6:
+        E.append(f"MUSIC_T0 = {T.MUSIC_T0!r} is not beat_time(R0) = BEAT0 + (M0 + R0) * PER = {t0!r} ({(T.MUSIC_T0 - t0) * 1000:+.1f} ms): the song would start that far from the picture; "
+                 "write MUSIC_T0 = beat_time(R0)")
+    n = int(round((T.R1 - T.R0) * T.FPB))
+    if int(T.N_FRAMES) != n:
+        E.append(f"N_FRAMES = {T.N_FRAMES!r} is not round((R1 - R0) * FPB) = {n}: write N_FRAMES = int(round((R1 - R0) * FPB))")
+    return E
+
+
+def _cap(lines, n=8):
+    return lines if len(lines) <= n else lines[:n] + [f"... and {len(lines) - n} more of the same kind"]
+
+
+def sync_problems(T):
+    """SYNC 2 on the segments: every cut (a segment's first anchor) and every shot (a kill's beat) on an exact output frame; HITS present, one musical beat per kill, each
+    inside its take and shown on vis(hit, HIT_LEAD). The fix for each is the same: write the MUSICAL beat in E and let the SEGS loop place it (timeline_ref_example.py)"""
+    segs, R0, F = T.SEGS, T.R0, T.FPB
+    frame = lambda b: (b - R0) * F
+    off = lambda b: abs(frame(b) - round(frame(b))) > FRAME_TOL
+    cut, shot, hit = [], [], []
+    for i, s in enumerate(segs):
+        b0 = s["a"][0][0]
+        if off(b0):
+            cut.append(f"segment {i} ({s.get('clip')}): its cut (first anchor, beat {b0:.9f}) falls on output frame {frame(b0):.4f}, not on a whole frame: a cut is shown on an exact frame "
+                       "(write the cut's musical beat in E and let the SEGS loop place it with vis(m0, CUT_LEAD))")
+        for k, lv in s["kills"]:
+            if off(k):
+                shot.append(f"segment {i} ({s.get('clip')}): the shot at beat {k:.9f} falls on output frame {frame(k):.4f}, not on a whole frame: a shot is shown on an exact frame "
+                            "(write the kill's measured hit in E and let the SEGS loop place it with vis(hit, HIT_LEAD))")
+    hits = getattr(T, "HITS", None)
+    nk = sum(len(s["kills"]) for s in segs)
+    if hits is None:
+        hit.append("HITS is missing in timeline.py (the musical beat of every kill: copy the SEGS loop and the KILLS / HITS lists from timeline_ref_example.py)")
+    elif len(hits) != nk:
+        hit.append(f"HITS holds {len(hits)} musical beats for {nk} kills (the SEGS loop of timeline_ref_example.py builds both lists)")
+    vis, HL = getattr(T, "vis", None), getattr(T, "HIT_LEAD", 1)
+    for i, s in enumerate(segs):
+        hb = s.get("hits")
+        if hb is None or len(hb) != len(s["kills"]):
+            hit.append(f"segment {i} ({s.get('clip')}): s[\"hits\"] must hold one musical beat per kill ({len(s['kills'])}), it holds {None if hb is None else len(hb)}: S(..., hits=...) / the SEGS loop sets it")
+            continue
+        r0, r1 = s["a"][0][0], s["a"][-1][0]
+        for (k, lv), m in zip(s["kills"], hb):
+            if not r0 - 1e-6 <= m <= r1 + 1e-6:
+                hit.append(f"segment {i} ({s.get('clip')}): the hit at beat {m:.9f} lies outside its take (beats {r0:.6f} .. {r1:.6f}): a kill's hit belongs to the take that shows it")
+            elif vis is not None and abs(vis(m, HL) - k) > 1e-6:
+                hit.append(f"segment {i} ({s.get('clip')}): the shot is shown at beat {k:.9f} but its hit (beat {m:.9f}) is shown at vis(hit, HIT_LEAD) = {vis(m, HL):.9f}: the picture would "
+                           "not sit on the frame HIT_LEAD frames before the drum (let the SEGS loop place the shot)")
+    return _cap(cut) + _cap(shot) + _cap(hit)
+
+
 def check(T, music=False, speed=True):
     """-> list of problems (strings) of the timeline module T. speed=False leaves the MAX_SPEED errors to the caller (gate.py asks fast_forward() itself)."""
     E = []
     for name in ("SEGS", "R0", "R1", "PER", "FPB", "BEAT0", "M0", "MUSIC", "FADE_OUT", "MUSIC_T0"):
         if not hasattr(T, name):
             E.append(f"{name} is missing in timeline.py (copy it from timeline_example.py / timeline_ref_example.py)")
+    if E:
+        return E
+    sync = getattr(T, "SYNC", 0)
+    if not isinstance(sync, (int, float)) or sync < SYNC_NEEDED:
+        return [sync_update_message(sync)]
+    for name in ("BPM", "FPS", "N_FRAMES"):
+        if not hasattr(T, name):
+            E.append(f"{name} is missing in timeline.py (copy it from timeline_example.py / timeline_ref_example.py)")
+    if E:
+        return E
+    E += grid_problems(T)                                  # the grid constants agree with each other (audio.py and render.py read different ones)
     if E:
         return E
     cuts = getattr(T, "CUTS_ON", None)
@@ -314,6 +452,8 @@ def check(T, music=False, speed=True):
             E.append(f"the last segment ends at beat {prev:g}, before R1 = {T.R1:g}: its last anchor must be at or after R1")
     else:
         E.append("SEGS is empty: the timeline has no segments")
+    if not E:                                              # the contract's checks need sound anchors / maps
+        E += sync_problems(T)
     if speed and not E:                                    # the maps are sound: now the speed ceiling (MAX_SPEED)
         E += speed_problems(T)
     if music:

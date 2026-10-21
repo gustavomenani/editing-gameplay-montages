@@ -41,7 +41,7 @@ Where the song has no such part, leave that part out; never invent a bullet time
 
 ## 3. Kill rhythm
 
-- Kills only on measured hits (`beat_hits.py` / `music_pulses.py`). In the model 8 of the 21 kills after the drop sit
+- Kills only on the ATTACK of a measured hit (`beat_hits.py`, `music_hits.py`; `music_pulses.py` checks it within 8.3 ms). In the model 8 of the 21 kills after the drop sit
   on the backbeat snare; the others on kicks (on the beat and on off-beat eighths) and three syncopated hits.
 - The spacing is set in SECONDS, then rounded to the song's hits: median 1.0 s, range 0.5 to 1.7 s, about 10 kills per
   10 s. In beats that is `gap ≈ BPM / 60` beats:
@@ -70,9 +70,9 @@ Where the song has no such part, leave that part out; never invent a bullet time
 
 | Phase | In the model | Why |
 |---|---|---|
-| Cut | 14 output frames before the take's first shot (0.48 beat at 124 BPM, so a kill on the beat gets its cut on the eighth before it) | the enemy is seen before he dies; a kill 4 frames after a cut "nem aparece" |
+| Cut | SHOWN 14 output frames (12 to 16) before the take's first shot, on a line of the song's lattice (0.48 beat at 124 BPM, so a kill on the beat gets its cut on the line about an eighth before it); the picture cuts `CUT_LEAD` (1) frame before that line | the enemy is seen before he dies; a kill 4 frames after a cut "nem aparece" |
 | Lead | real time from the cut to the shot; the muzzle-flash frame on the hit | nothing ever plays faster than real time ("do nada voce coloca o video muito rapido") |
-| Shot | real time for 8 frames (recoil, flash) | slow motion on the flash magnifies interpolation artifacts |
+| Shot | real time for 8 frames (recoil, flash); the muzzle flash shows on the shot frame, `HIT_LEAD` (1) frame before the gunshot sounds, with every accent starting and peaking on that frame | slow motion on the flash magnifies interpolation artifacts; a picture a frame ahead of its sound reads as in sync |
 | Death | one constant slow rate that reaches `K + upto` (the frame the body is down) exactly at the next cut: 0.2 to 0.9x depending on the gap | the enemy visibly dies inside the take ("ele nem chegou a morrer") |
 | Long gap | when the death would need less than about 0.15x, slow until the body is down, then ease back toward real time | no near-frozen picture |
 
@@ -96,7 +96,7 @@ No take without a kill; no enemy of a few pixels; the kill feed row confirms eac
 
 ## 6. Sound
 
-- One gunshot per kill with its onset on the beat, a little louder than the house mix (`GAME_LEVEL` 0.95): "dar um
+- One gunshot per kill with its onset on the musical hit, to the sample, a little louder than the house mix (`GAME_LEVEL` 0.95): "dar um
   pequeno destaque a mais no som das kills". A clip without a clean shot borrows the same weapon's shot (`shot_from`).
 - A sub thump under every kill (`KILL_THUMP` 0.18), a swish on every blur-in cut (`WHOOSH_BLUR` 0.07, panned with the
   whip), booms on the level-3 and bullet-time kills (`BOOMS`, 0.18 to 0.26).
@@ -119,7 +119,7 @@ bloom 0.11 and a faint wide glow. `LOOK = "modelo"` reproduces it; the user's wo
 | very fast (above 150 BPM, drum and bass) | gaps of 2.5 to 3 beats; lead 12 frames; the mid bullet time on the breakdown |
 | slow (below 90 BPM) | gaps of 1 to 1.5 beats; loud hats may carry kills in dense bars |
 | half-time trap (808 on 1, snare on 3) | kills on 808s and snares (loud hats in dense bars); gaps by seconds (section 3) |
-| a live band mix (the bass on every half beat) | nothing to do: the measure takes the kick from the onset of the low band (a held bass note does not count) and the snare from body and crack arriving together, within +-50 ms of the half beat (a drummer drifts), so `music_pulses.py` lists the backbeat snares and the drafter gives them level 2 (measured: 12 of 12 backbeat snares found); give `level` in the plan only to override |
+| a live band mix (the bass on every half beat) | nothing to do: the measure takes the kick from the onset of the low band (a held bass note does not count) and the snare from body and crack arriving together; an attack within 50 ms of a half beat is filed on it (a drummer drifts) and the event goes on the attack's own time, never on the half beat. `music_grid.py` says whether one grid fits at all (`constant grid NOT adequate`: place on `hits.json` times). `music_pulses.py` lists the backbeat snares and the drafter gives them level 2 (measured: 12 of 12 backbeat snares found); give `level` in the plan only to override |
 | drums everywhere equally strong | fewer bumps: about one every 2 s, on the strongest hits only |
 | no bar where the drums thin out | no mid bullet time |
 | fewer kills than the section needs | a shorter section, not slower takes; never repeat a play |
@@ -129,14 +129,16 @@ bloom 0.11 and a faint wide glow. `LOOK = "modelo"` reproduces it; the user's wo
 
 | Measure | Model | Where to read it |
 |---|---|---|
-| kills on measured hits | 24 of 24 | `music_pulses.py` |
-| lead per take (frames from cut to shot) | 14 (bullet times: their lead-in) | the drafter's explanation |
+| every kill, bump and boom on a measured attack | all | `music_pulses.py`: PLACEMENT CHECK with no FAIL (each within 8.3 ms of an attack; a drafted one within about 2 ms) |
+| lead per take (SHOWN frames from the cut's frame to the shot's frame) | 14, 12 to 16 (bullet times: their lead-in) | the drafter's explanation; `check.py` alignment |
 | every death shown | 24 of 24 | `deathstrip.py` (green tiles until the body is down) |
 | kills per 10 s after the drop | about 10 | `timeline.py` |
 | median gap after the drop | 1.0 s | the drafter's explanation |
 | fastest frame | 1.17x (easing); with `MAX_SPEED = 1.0` the drafter keeps it at or below 1.02 | preflight, `check.py` "fast-forward" |
 | output frames below 0.6x | 63 % | the drafter's statistics |
 | bumps | 13 in 31 s | `timeline.py` |
-| flashes | 18 on +0, 3 faint on +0, 3 on +1 (`check.py`'s prediction for the tiles of `sync_*.jpg`) | `check.py --sheets` |
+| muzzle flash on the shot frame, absent on -1 | every kill (level 3: the inverted frame is on the shot frame; the flash is not measurable there) | `check.py --sheets` (`ok` per kill), `syncaudit.py` (`kill-flash`) |
+| accents (exposure pop, inverted frame, burst), cuts, bumps, words on their frames | 0 frames off | `syncaudit.py` (`fx-frame`, `cut-frame`, `bump-frame`, `word-frame`) |
+| sound against the song; gunshots against their hits | 0 +- 0.1 ms (error above 1 ms); a placed gunshot within 1 ms of its hit (error above 1 ms, or missing from the mix) | `syncaudit.py` (`av-offset`, `av-drift`, `kill-audio`) |
 | judder | 0.26 | `check.py` |
 | sound | -7.5 LUFS, true peak -1.0 dBFS | `check.py` |

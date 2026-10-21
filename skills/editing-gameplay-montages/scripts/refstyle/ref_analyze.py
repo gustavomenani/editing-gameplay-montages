@@ -4,19 +4,34 @@
 
 Writes in DIR (default: the current folder):
     ref_notes.md     the findings in words, ending with SUGGESTED SETTINGS for timeline.py
-    ref_notes.json   the same as numbers (cuts with their beat offsets and transition kinds, pacing, text, colour, ...)
+    ref_notes.json   the same as numbers (cuts with their lattice lines and transition kinds, pacing, text, colour, ...) and the block
+                     `adopt` (version 2): the numbers draft_ref_timeline.py takes from the reference (see below)
     ref_sheets/      images to READ afterwards: the whole video at 4 fps, every frame around three cuts, enlarged centre
                      crops, the first and the last seconds
 
 What it measures (reference-style.md, "Reading the reference"): orientation and layout (full frame, window over a blurred
-backdrop, black bars); the beat grid of the reference's own sound (music_tempo.py + music_grid.py) and every cut with its
-offset to the grid and its length in beats; how the cuts are made (hard, whip, zoom burst, roll, flash, dip) with a confidence;
-slow motion and freezes; big words (no OCR); colour, vignette, grain, colour fringe; shake and zoom around the cuts; the ending.
-`--music` is the song of YOUR edit: the clip lengths are then also given for its tempo. A reference without sound is read in
-seconds and frames only (with `--music` the grid is fitted to the cuts: offsets are then meaningless and said so).
+backdrop, black bars); every cut (the FIRST frame of each change of picture, 2 frames apart at the least) and the lattice of
+1, 1/2, 1/4 or 1/8 beat they sit on (step in seconds, offset in output frames, the gaps between cuts in lattice steps: the reference's
+rhythm); the beat grid of the reference's own sound (music_tempo.py + music_grid.py, or your song's own grid when the reference's sound
+IS your song: cross-correlated, `same_song.offset_s`); how many frames its cuts (`cut_lead_frames`) and the pops / muzzle flashes of its KILLS
+(`hit_lead_frames`, kills only: flash frames at cuts are cut evidence) come before the drum attack of their lattice line (attacks measured on its own sound, the skill's one attack definition); its kills (the
+kill feed, 1920x1080 Valorant: rate, gaps in steps, lock to the lattice); how the cuts are made (hard, whip, zoom burst, roll, flash,
+dip) with a confidence; slow motion and freezes; big words (no OCR); colour, vignette, grain, colour fringe; shake and zoom around the
+cuts; the ending (fade seconds and black seconds apart).
+`--music` is the song of YOUR edit: the clip lengths are then also given for its tempo, and it is tested for being the reference's own
+sound. A reference without sound is read in seconds and frames only (with `--music` the grid is fitted to the cuts: offsets are then
+meaningless and said so).
+
+`adopt` keys: version, frame, same_song{offset_s, ncc, second_best}, lattice{step_s, step_beats_ref, ref_bpm_read, locked_R, offset_frames,
+offset_s, residual_ms, locked_share} | null, cut_gaps_steps{steps: count} | null, cut_rate_per_s, kills{per_s, count, gap_steps_median,
+lock_R, lock_steps} | null, transitions{hard, whip, zoom, roll, [flash, dip], blur_frames}, slow{share, rate}, intro_steps, ending{kind,
+fade_s, black_s, dim_s}, look{...}, look_preset, words{cap_height, centre} | null, cut_lead_frames (int 0..3 | null), hit_lead_frames
+(int 0..3 | null: null = not measured from kills, the draft keeps its default) + hit_lead_note (the numbers seen when null). Positions and lengths are in lattice steps, never in seconds of the reference; null = not measured.
 
 Every number is a measurement of pixels and sound, not a judgement: the notes say where it is a lower bound or a guess. Needs the
-project venv (numpy, opencv) and ffmpeg (ff.py). About 35 s of analysis per minute of video on this skill's PC with the sheets (25 s without), longer while a game or a render runs."""
+project venv (numpy, opencv, scipy) and ffmpeg (ff.py). About 40-50 s per 33 s clip on this skill's PC (the kill feed and the drum
+attacks run beside the picture work), longer while a game or a render runs; a reference that makes ffmpeg print decode errors no longer
+hangs it."""
 import argparse
 import collections
 import datetime
@@ -36,6 +51,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import refmeasure as rm  # noqa: E402
 from ff import FF  # noqa: E402
+import beat_hits as bh  # noqa: E402  (refmeasure put the scripts folder on sys.path): the skill's one attack definition and its class biases
 
 # What the same measures read on the worked example (reference-style edit, LOOK absent = "padrao"): the yardstick for the LOOK
 # suggestion, because the colour of the footage itself moves the raw numbers. Measured with this script on the worked example's render.
@@ -74,46 +90,239 @@ def fmt_beats(v):
 
 
 # ------------------------------------------------------------------------------------------------ cut and beat
+LATTICES = (1.0, 0.5, 0.25, 0.125)                   # beats; the lattice of the reference's rhythm is the coarsest of these that the cuts sit on
+
+
 def align_cuts(cuts, fps, bpm, beat0):
-    """Each cut's position on the beat grid, by circular statistics: for a lattice of 1, 1/2 or 1/4 beat the cut phases are averaged on the
-    circle; a mean resultant length R >= 0.6 (chance: about 1 / sqrt(cuts)) means the cuts sit at a FIXED distance from the lattice, and
-    the mean phase is that distance (negative = the cut comes before the hit). The coarsest locked lattice is used.
-    -> dict(step, offset_ms_median, ...); fills cut['beat'] (beats from the grid's first beat) and cut['offset_ms']."""
+    """Each cut's position on the beat grid, by circular statistics: for a lattice of 1, 1/2, 1/4 or 1/8 beat the cut phases are averaged on
+    the circle; a mean resultant length R >= max(0.3, 3 / sqrt(cuts)) (a Rayleigh test: chance gives about 1 / sqrt(cuts)) means the cuts sit at
+    a FIXED distance from the lattice, and the mean phase is that distance (negative = the cut comes before the line). Cuts that sit on a
+    coarse lattice also sit on the finer ones, so the COARSEST accepted lattice whose R is within 15 % of the best finer one is used, among
+    the lattices whose offset is plausible (a cut leads or trails its line by at most 80 ms = 5 frames: a funk reference reads 1/2 beat at
+    -102 ms but 1/4 beat at +48 ms, the same cuts).
+    The offset is reported in seconds, ms and OUTPUT FRAMES; the lattice step in seconds (the unit the drafter maps to the user's song);
+    the gaps between consecutive cuts in lattice steps (the reference's rhythm template: 72 of 73 gaps of a test reference are whole
+    steps); `step_idx` / `line_t` of each cut = its lattice line.
+    -> dict(step (beats, None when not locked), step_s, offset_s_median, offset_frames_median, residual_ms, gaps_steps, ...);
+    fills cut['beat'] (beats from the grid's first beat), cut['offset_ms'], cut['step_idx'], cut['line_t']."""
     per = 60.0 / bpm
     ts = np.array([c["frame"] / fps for c in cuts])
     if len(ts) < 5:
         return dict(step=None, note="fewer than 5 cuts: no alignment statistics")
-    chosen, rows = None, []
-    for step in (1.0, 0.5, 0.25):
+    thr = max(0.3, 3.0 / math.sqrt(len(ts)))
+    rows = []
+    for step in LATTICES:
         lat = per * step
         z = np.mean(np.exp(2j * np.pi * (ts - beat0) / lat))
         R, mu = float(abs(z)), float(np.angle(z) / (2 * np.pi))
-        rows.append(dict(step=step, concentration=round(R, 3), chance=round(float(1 / math.sqrt(len(ts))), 3), offset_ms=round(mu * lat * 1000, 1)))
-        if chosen is None and R >= 0.6:
-            chosen = (step, mu, R)
+        rows.append(dict(step=step, concentration=round(R, 3), chance=round(float(1 / math.sqrt(len(ts))), 3), threshold=round(thr, 3), accepted=bool(R >= thr),
+                         offset_ms=round(mu * lat * 1000, 1), mu=mu))
+    chosen = None
+    acc = [r for r in rows if r["accepted"]]
+    acc = [r for r in acc if abs(r["offset_ms"]) <= 80.0] or acc
+    for i, r in enumerate(acc):                      # coarse -> fine
+        if r["concentration"] >= 0.85 * max([q["concentration"] for q in acc[i:]]):
+            chosen = r
+            break
     if chosen:
-        step, mu, R = chosen
+        step, mu, R = chosen["step"], chosen["mu"], chosen["concentration"]
     else:
-        step = 0.5
-        mu = 0.0
-        R = 0.0
+        step, mu, R = 0.5, 0.0, 0.0
     lat = per * step
     ph = (ts - beat0) / lat
-    off = (ph - np.round(ph - mu)) * lat * 1000                 # distance to the lattice, around the mean offset
-    for c, o, t in zip(cuts, off, ts):
+    idx = np.round(ph - mu).astype(int)
+    off = (ph - idx) * lat * 1000                           # distance to the lattice line, around the mean offset
+    for c, o, t, k in zip(cuts, off, ts, idx):
         c["beat"] = round(float((t - beat0) / per), 3)
         c["offset_ms"] = round(float(o), 1)
-    res = dict(step=step if chosen else None, report_step=step, lattice_tests=rows, concentration=round(R, 3))
+        c["step_idx"] = int(k)
+        c["line_t"] = round(float(beat0 + k * lat), 4)
+    for r in rows:
+        r.pop("mu")
+    res = dict(step=step if chosen else None, report_step=step, lattice_tests=rows, concentration=round(R, 3), threshold=round(thr, 3))
     mu_ms = mu * lat * 1000
-    lock = np.abs(off - mu_ms) <= 40
+    tol = min(40.0, 0.25 * lat * 1000)                      # 40 ms, or a quarter of the step on a fine lattice
+    lock = np.abs(off - mu_ms) <= tol
     res["locked_share"] = round(float(lock.mean()), 3)
     if chosen and lock.sum() >= 3:
         o = off[lock]
-        res.update(offset_ms_median=round(float(np.median(o)), 1), offset_ms_mean=round(float(o.mean()), 1), offset_ms_std=round(float(o.std()), 1),
+        res.update(step_s=round(float(lat), 4), offset_ms_median=round(float(np.median(o)), 1), offset_ms_mean=round(float(o.mean()), 1), offset_ms_std=round(float(o.std()), 1),
                    offset_ms_p10=round(float(np.percentile(o, 10)), 1), offset_ms_p90=round(float(np.percentile(o, 90)), 1))
+        res["offset_s_median"] = round(res["offset_ms_median"] / 1000.0, 5)
         res["offset_frames_median"] = round(res["offset_ms_median"] * fps / 1000, 2)
         res["offset_beats_median"] = round(res["offset_ms_median"] / (per * 1000), 3)
+        res["residual_ms"] = round(float(o.std()), 1)
+        gaps = np.diff(idx)
+        res["gaps_steps"] = {str(int(k)): int(v) for k, v in sorted(collections.Counter(gaps.tolist()).items()) if k >= 1}
+        res["gaps_same_step"] = int(np.sum(gaps < 1))           # two cuts on one line (flash cuts 2-3 frames apart): no rhythm step
+        res["gaps_whole_share"] = round(float(np.mean(np.abs(np.diff(ts) - gaps * lat) <= max(0.03, 0.2 * lat))), 3)
     return res
+
+
+STRONG_RISE = 1.0                                   # ln units over 6 ms (the envelope at least 2.7x): the strong half of the kick / snare attacks; the leads below read the same (38.3 ms) from 0.8 to 1.4
+
+
+def _strong_attacks(attacks, min_rise=STRONG_RISE, bands=("low", "mid")):
+    a = [x for x in (attacks or []) if x["band"] in bands and x["rise"] >= min_rise]
+    return np.array([x["t"] for x in a]), np.array([x["rise"] for x in a])
+
+
+def _lead_stats(leads_ms, fps):
+    x = np.array(leads_ms, float)
+    med = float(np.median(x))
+    return dict(n=int(len(x)), median_ms=round(med, 1), mean_ms=round(float(x.mean()), 1), std_ms=round(float(x.std()), 1), median_frames=round(med * fps / 1000.0, 2),
+                stable_share=round(float(np.mean(np.abs(x - med) <= 1.5 * 1000.0 / fps)), 2))
+
+
+def cut_lead(cuts, attacks, fps, al):
+    """How many frames the reference's cuts come BEFORE the drum attack of their lattice line (the moment of the music the cut belongs to).
+    For every cut: the strongest kick / snare attack (`drum_attacks`, rise >= STRONG_RISE) within 45 ms of its lattice line; lead = attack - cut
+    (positive = the picture comes first). Needs a locked lattice on the reference's own sound, 8 cuts with an attack, and 55 % of the leads
+    within 1.5 frames of their median (a convention, not scatter). -> dict(frames (rounded, 0..3), n, median_ms, ...) or dict(frames=None, why=...)."""
+    if not attacks or al.get("step") is None or "step_s" not in al:
+        return dict(frames=None, why="no locked lattice on the reference's own sound, or no sound")
+    ta, lv = _strong_attacks(attacks)
+    if not len(ta):
+        return dict(frames=None, why="no clear kick / snare attacks in the reference's sound")
+    leads = []
+    for c in cuts:
+        sel = np.nonzero(np.abs(ta - c["line_t"]) <= 0.045)[0]
+        if len(sel):
+            leads.append((ta[sel[int(np.argmax(lv[sel]))]] - c["frame"] / fps) * 1000.0)
+    if len(leads) < 8:
+        return dict(frames=None, why="only %d cuts have a kick / snare attack on their lattice line (8 needed)" % len(leads))
+    st = _lead_stats(leads, fps)
+    if st["stable_share"] < 0.55:
+        st.update(frames=None, why="the leads are scattered (%.0f %% within 1.5 frames of their median): no stable convention" % (st["stable_share"] * 100))
+        return st
+    st["frames"] = int(max(0, min(3, round(st["median_frames"]))))
+    return st
+
+
+def hit_lead(sources, attacks, fps, al, beat0):
+    """How many frames the reference's KILL accents (the pop / muzzle flash of a kill) come BEFORE the drum attack they belong to. `sources` =
+    [(name, [(frame, line_t or None)])]; the drafter's call passes only the pops tied to a kill of the kill feed: flash frames at cuts are cut
+    evidence (they feed `cut_lead`) and never set the kill lead. Each accent is matched to the strongest kick / snare attack within 30 ms of
+    the first lattice line after it (with no lattice: within -3..+6 frames); lead = attack - accent. A source is used when 6 of its accents
+    have an attack and 55 % of those leads are within 1.5 frames of their median.
+    -> dict(frames (rounded, 0..3), n, median_ms, source, tried) or dict(frames=None, why=..., tried)."""
+    if not attacks:
+        return dict(frames=None, why="the reference has no sound")
+    ta, lv = _strong_attacks(attacks)
+    if not len(ta):
+        return dict(frames=None, why="no clear kick / snare attacks in the reference's sound")
+    lat = al.get("step_s") if (al and al.get("step") is not None) else None
+    tried = []
+    for name, items in sources:
+        leads = []
+        for f, line in items:
+            t = f / fps
+            if lat and line is None:
+                line = beat0 + math.ceil((t - 3.0 / fps - beat0) / lat) * lat
+            sel = np.nonzero(np.abs(ta - line) <= 0.03)[0] if line is not None else np.nonzero((ta - t >= -3.0 / fps) & (ta - t <= 6.0 / fps))[0]
+            if len(sel):
+                leads.append((ta[sel[int(np.argmax(lv[sel]))]] - t) * 1000.0)
+        if len(leads) < 6:
+            tried.append("%s: %d accents, %d with an attack (6 needed)" % (name, len(items), len(leads)))
+            continue
+        st = _lead_stats(leads, fps)
+        if st["stable_share"] < 0.55:
+            tried.append("%s: %d accents, leads scattered (median %+.0f ms, std %.0f ms, %.0f %% within 1.5 frames of it)" % (name, len(leads), st["median_ms"], st["std_ms"], st["stable_share"] * 100))
+            continue
+        st.update(source=name, accents=len(items), frames=int(max(0, min(3, round(st["median_frames"])))), tried=tried)
+        return st
+    return dict(frames=None, why="; ".join(tried) or "no accent frames (flashes, pops) in the reference", tried=tried)
+
+
+def kills_block(events, pops, cuts, fps, lat_s, beat0, t_span):
+    """The reference's kills from its kill feed (`detect_kills.scan` events: the frame a kill row appears, about 8 frames after the shot, a
+    constant lag): de-duplicated (rows < 9 frames apart are one kill), each with the lattice step of the cut lattice, the gap to the previous kill
+    in steps and its pop frame (the first isolated luma pop from 25 frames before the row to 3 after it, else None).
+    per_s = kills / the span from the first cut to the end of the picture; lock_R = circular concentration of the kill times on the lattice
+    (the constant feed lag only shifts the phase). -> dict or None."""
+    fe = []
+    for e in events:
+        if not fe or e["frame"] - fe[-1] >= 9:
+            fe.append(int(e["frame"]))
+    if not fe:
+        return None
+    rows = []
+    for f in fe:
+        p = [q for q in pops if f - 25 <= q <= f + 3]
+        rows.append(dict(frame=f, t=round(f / fps, 3), pop_frame=int(p[0]) if p else None))
+    ts = np.array([r["t"] for r in rows])
+    out = dict(count=len(rows), per_s=round(len(rows) / max(t_span, 1e-6), 3), kills=rows)
+    if len(ts) >= 2:
+        out["gap_s_median"] = round(float(np.median(np.diff(ts))), 3)
+    if lat_s:
+        ph = (ts - beat0) / lat_s
+        for r, k in zip(rows, ph):
+            r["step"] = round(float(k), 2)
+        if len(ts) >= 2:
+            out["gap_steps_median"] = round(float(np.median(np.diff(ts))) / lat_s, 2)
+        if len(ts) >= 5:
+            by = {m_: float(abs(np.mean(np.exp(2j * np.pi * ph / m_)))) for m_ in (1, 2, 4)}       # kills often sit on every 2nd or 4th line
+            best = max(by, key=lambda m_: by[m_])
+            out["lock_R"] = round(by[best], 3)
+            out["lock_steps"] = best
+            out["lock_R_by_steps"] = {str(m_): round(v, 3) for m_, v in by.items()}
+            out["lock_chance"] = round(1.0 / math.sqrt(len(ts)), 3)
+    return out
+
+
+def kill_feed(src, info):
+    """The reference's kill feed: `detect_kills.scan` (kill rows in the top-right corner of a 1920x1080 frame) on a temp copy of its result.
+    -> (events [dict(frame, t, ...)], note). Any other game / resolution simply finds nothing."""
+    import tempfile
+    import detect_kills as dk
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            dk.scan(src, td)
+            p = os.path.join(td, os.path.splitext(os.path.basename(src))[0] + ".json")
+            ev = json.load(open(p, encoding="utf-8"))["events"] if os.path.exists(p) else []
+        except Exception as e:                    # a broken scan must not stop the analysis: the kills are reported as not measured
+            return [], "kill feed scan failed: %s" % str(e)[:160]
+    return ev, ("" if ev else "no kill feed rows found (detect_kills.py reads the Valorant feed of a 1920x1080 frame)")
+
+
+def build_adopt(frame, same, al, own_sound, bpm, cuts, t_first, t_end, kb, spd, look, look_preset, txt, words_found, end, cl, hl, blur_frames):
+    """ref_notes.json["adopt"], version 2: the block the drafter reads (reference-style.md, "What the draft takes from the reference").
+    Every position or length of the reference is in LATTICE STEPS of its own measured grid (the drafter turns them into the user's song by the
+    step, never by seconds); only latency-like constants stay in frames or seconds. A trait that was not measured is None, never a guess."""
+    locked = al is not None and al.get("step") is not None and "step_s" in al
+    kinds = collections.Counter(c["kind"] for c in cuts if c.get("kind") not in (None, "unknown"))
+    kinds["roll"] += kinds.pop("blur", 0)
+    tot = max(1, sum(kinds.values()))
+    trans = {k: round(kinds.get(k, 0) / tot, 3) for k in ("hard", "whip", "zoom", "roll")}
+    for k in ("flash", "dip"):
+        if kinds.get(k):
+            trans[k] = round(kinds[k] / tot, 3)
+    trans["blur_frames"] = blur_frames
+    span = max(t_end - t_first, 1e-6)
+    adopt = dict(
+        version=2,
+        frame=frame,
+        same_song=dict(offset_s=same["offset_s"] if (same and same.get("same")) else None, ncc=(same or {}).get("ncc"), second_best=(same or {}).get("second")),
+        lattice=None, cut_gaps_steps=None, intro_steps=None,
+        cut_rate_per_s=round(len(cuts) / span, 2) if len(cuts) >= 5 else None,
+        kills=None,
+        transitions=trans,
+        slow=dict(share=spd.get("slow_share"), rate=spd.get("rate")),
+        ending=dict(kind=end["kind"], fade_s=end.get("fade_s"), black_s=end.get("black_s"), dim_s=end.get("dim_s")),
+        look=look, look_preset=look_preset,
+        words=dict(cap_height=txt["cap_height"], centre=[txt["cx"], txt["cy"]]) if words_found else None,
+        cut_lead_frames=cl.get("frames") if cl else None,
+        hit_lead_frames=hl.get("frames") if hl else None,
+        hit_lead_note=(hl.get("note") if hl else None))
+    if locked:
+        adopt["lattice"] = dict(step_s=al["step_s"], step_beats_ref=al["step"], ref_bpm_read=bpm, locked_R=al["concentration"],
+                                offset_frames=al["offset_frames_median"] if own_sound else None, offset_s=al["offset_s_median"] if own_sound else None,
+                                residual_ms=al["residual_ms"], locked_share=al["locked_share"])
+        adopt["cut_gaps_steps"] = al["gaps_steps"]
+        adopt["intro_steps"] = int(round((t_first - (al["offset_s_median"] if own_sound else 0.0)) / al["step_s"])) if t_first >= 2.0 else 0
+    if kb:
+        adopt["kills"] = dict(per_s=round(kb["count"] / span, 2), count=kb["count"], gap_steps_median=kb.get("gap_steps_median"), lock_R=kb.get("lock_R"), lock_steps=kb.get("lock_steps"))
+    return adopt
 
 
 def fit_cut_grid(cuts, fps):
@@ -412,7 +621,7 @@ def make_sheets(src, info, outdir, cuts, text, ending, fps, t_first_cut):
 def main():
     ap = argparse.ArgumentParser(description="Measure a reference edit: layout, cuts and beats, transitions, speed, text, colour, ending.")
     ap.add_argument("video")
-    ap.add_argument("--music", help="the song of YOUR edit (clip lengths are then also given for its tempo)")
+    ap.add_argument("--music", help="the song of YOUR edit (clip lengths are then also given for its tempo; when the reference's sound IS this song, its own grid is used and `same_song.offset_s` says where)")
     ap.add_argument("--out", default=".", help="folder for ref_notes.md, ref_notes.json, ref_sheets/ (default: here)")
     ap.add_argument("--max-seconds", type=float, default=150.0, help="analyse at most this much of the video (default 150)")
     ap.add_argument("--no-sheets", action="store_true", help="skip the contact sheets")
@@ -435,10 +644,10 @@ def main():
     info = rm.probe(src)
     fps = info["fps"]
     max_frames = int(a.max_seconds * fps)
-    ex = ThreadPoolExecutor(max_workers=3)           # the sound, the words and the colour run beside the picture work
+    ex = ThreadPoolExecutor(max_workers=5)           # the sound, the words, the colour, the kill feed and the drum attacks run beside the picture work
 
     def audio_job():
-        beat_, err_, song_, serr_, pul_ = None, None, None, None, None
+        beat_, err_, song_, serr_, pul_, same_ = None, None, None, None, None, None
         if info["has_audio"]:
             beat_ = rm.beat_grid(src, 0.0, min(info["duration"], a.max_seconds))
             if "error" in beat_:
@@ -447,10 +656,14 @@ def main():
             song_ = rm.beat_grid(a.music)
             if "error" in song_:
                 serr_, song_ = song_["error"], None
+            if info["has_audio"]:
+                same_ = rm.same_song(src, a.music)
         if beat_:
             pul_ = rm.audio_pulses(src, beat_["bpm"], beat_["beat0"], 0.5)
-        return beat_, err_, song_, serr_, pul_
+        return beat_, err_, song_, serr_, pul_, same_
     f_audio = ex.submit(audio_job)
+    f_att = ex.submit(rm.drum_attacks, src, a.max_seconds, info.get("av_offset_s", 0.0)) if info["has_audio"] else None
+    f_kills = ex.submit(kill_feed, src, info) if (info["width"] >= 1900 and info["height"] >= 1000) else None
     G, C, nat_size = rm.decode(src, info, max_frames)
     n = len(G)
     dur = n / fps
@@ -474,14 +687,16 @@ def main():
     f_col = ex.submit(colour_job)
     t = time.time()
     L, R, Th, S = rm.frame_pair_features(G, C, roi)
-    cuts = rm.detect_cuts(L, R)
+    cuts = rm.detect_cuts(L, R, S)
     rm.classify_transitions(S, L, cuts, fps)
     blips = rm.find_blips(Th, L)
+    pops = rm.find_pops(G, [c["frame"] for c in cuts])
     lap("cuts", t)
 
     # ---- beat grid
     t = time.time()
-    beat, beat_err, song, song_err, pul = f_audio.result()
+    beat, beat_err, song, song_err, pul, same = f_audio.result()
+    attacks = f_att.result() if f_att else []
     grid_source = "the reference's own sound" if beat else None
     if beat_err:
         print("beat grid of the reference: %s" % beat_err)
@@ -501,22 +716,30 @@ def main():
         ph = np.angle(np.mean(np.exp(2j * np.pi * (ts / (per * 0.5))))) / (2 * np.pi) if len(ts) else 0.0
         beat = dict(bpm=bpm, beat0=round(float((ph * per * 0.5) % per), 4), members=song["members"], weak=False, notes=["no sound in the reference: the song's tempo, the phase fitted to the cuts"])
         grid_source = "the song's tempo (--music), phase fitted to the cuts"
+    if same and same["same"] and song is not None:
+        # the reference's sound IS the song: the song's own (cleaner) grid, moved to the reference's clock, replaces the tempo family reading
+        per_s = 60.0 / song["bpm"]
+        beat = dict(bpm=song["bpm"], beat0=round(float((song["beat0"] - same["offset_s"]) % per_s), 4), members=song["members"], weak=bool(song.get("weak")), grid_adequate=song.get("grid_adequate", True),
+                    notes=["the reference's sound is your song (cross-correlation %.2f, second best %.2f): its own grid on the reference's clock, song time = reference time %+.4f s" % (same["ncc"], same["second"], same["offset_s"])] + list(song.get("notes", [])))
+        grid_source = "the reference's own sound (= your song)"
+        pul = rm.audio_pulses(src, beat["bpm"], beat["beat0"], 0.5)
     lap("beat grid (wait)", t)
     bpm = beat["bpm"] if beat else None
     beat0 = beat["beat0"] if beat else 0.0
+    own_sound = bool(grid_source) and grid_source.startswith("the reference's own sound")
 
     for c in cuts:
         c["t"] = round(c["frame"] / fps, 3)
     al = hist = None
     if bpm:
         al = align_cuts(cuts, fps, bpm, beat0)
-        if grid_source != "the reference's own sound":
+        if not own_sound:
             al["offset_note"] = "the grid was fitted to the cuts, so the offsets are meaningless"
             for c in cuts:
                 c.pop("offset_ms", None)
         hist = clip_lengths(cuts, fps, bpm)
     cuts_on = None
-    if beat and grid_source == "the reference's own sound" and pul is not None and len(cuts) >= 5:
+    if beat and own_sound and pul is not None and len(cuts) >= 5:
         cuts_on = cuts_on_analysis(cuts, fps, bpm, beat0, pul, (al or {}).get("offset_ms_median") or 0.0)
 
     # ---- speed, shake, zoom
@@ -532,6 +755,7 @@ def main():
     t = time.time()
     txt = f_text.result()
     col, nat, end = f_col.result()
+    kf, kf_note = f_kills.result() if f_kills else ([], "the kill feed is read on 1920x1080 references only")
     ex.shutdown()
     lap("text, colour, ending (wait)", t)
 
@@ -541,6 +765,25 @@ def main():
     blur_share = len(blur_cuts) / max(1, len([c for c in cuts if c.get("kind") != "unknown"]))
     blur_mean = float(np.mean([c["blur"] for c in blur_cuts])) if blur_cuts else None
     first_cut_t = cuts[0]["frame"] / fps if cuts else dur
+    t_end = end["start"] if (end["kind"] in ("luma fade", "fade to black") and end.get("start")) else dur       # the cut rhythm ends where the ending fade starts
+    lat_s = (al or {}).get("step_s") or ((60.0 / bpm / 2) if (bpm and own_sound) else None)
+    kb = kills_block(kf, pops, cuts, fps, lat_s, beat0, max(t_end - first_cut_t, 1e-6)) if kf else None
+    kill_pops = [r["pop_frame"] for r in kb["kills"] if r["pop_frame"] is not None] if kb else []
+    cl = cut_lead(cuts, attacks, fps, al) if (al and own_sound) else dict(frames=None, why="no beat grid of the reference's own sound")
+    line_of = {c["frame"]: c.get("line_t") for c in cuts} if own_sound else {}
+    nk = len(kb["kills"]) if kb else 0
+    # hit_lead = the KILL moments only (pops / flashes tied to a kill-feed row); flash frames at cuts are cut evidence and only reported
+    hl = hit_lead([("kill pops", [(f, None) for f in kill_pops])], attacks, fps, al if own_sound else None, beat0) if attacks else dict(frames=None, why="the reference has no sound")
+    cfl = hit_lead([("flash frames at cuts", [(fj, line_of.get(fc)) for fc, fj in rm.find_cut_flashes(G, [c["frame"] for c in cuts])])], attacks, fps, al if own_sound else None, beat0) if attacks else {}
+    hl["kills_with_pop"], hl["kills"] = len(kill_pops), nk
+    if cfl.get("median_frames") is not None:
+        hl["cut_flash"] = dict(median_frames=cfl["median_frames"], n=cfl["n"], median_ms=cfl["median_ms"], std_ms=cfl["std_ms"], stable_share=cfl["stable_share"])
+    if hl.get("frames") is None:
+        cf = hl.get("cut_flash")
+        hl["note"] = "not measured from kills: %s%s" % (
+            ("%d of %d kills have a pop / flash" % (len(kill_pops), nk)) if nk else ("no kill feed read (%s)" % (kf_note or "no kills")),
+            ("; cut-flash lead (cut evidence, NOT used for kills): median %.1f frames, n=%d" % (cf["median_frames"], cf["n"])) if cf else
+            ("; cut-flash lead (cut evidence, NOT used for kills): %s" % cfl["why"] if cfl.get("why") else ""))
     pacing = dict(cuts=len(cuts), cuts_per_minute=round(len(cuts) / dur * 60, 1), bpm=bpm, first_cut_s=round(first_cut_t, 2))
     lengths = [c["clip_frames"] for c in cuts if c.get("clip_frames")]
     pacing["clip_frames_median"] = float(np.median(lengths)) if lengths else None
@@ -633,6 +876,15 @@ def main():
                      slow_rate=(max(0.06, min(0.3, slow_rate)) if (sl is not None and sl >= 0.08 and slow_rate) else None), slow_motion=bool(sl is not None and sl >= 0.08),
                      intro_beats=intro_beats, words=bool(words_yes), words_check=bool(words_check), ending=end["kind"], ending_seconds=end.get("seconds"))
     suggested["LOOK_preset"] = nearest_preset(look)
+    blur_frames = None
+    bl_ = [c["blur_len"] for c in blur_cuts if c.get("clip_frames", 0) >= 9 and "blur_len" in c]
+    if len(bl_) >= 5:                              # only the clear blur-ins carry a length; fewer than 5 of them: not measured
+        blur_frames = int(round(float(np.median(bl_))))
+    adopt = build_adopt(frame_s, same, al, own_sound, bpm, cuts, first_cut_t, t_end, kb, spd, look, suggested["LOOK_preset"], txt, bool(words_yes or words_check), end, cl, hl, blur_frames)
+    if al and al.get("gaps_steps") is not None:
+        pacing["cut_gaps_steps"] = al["gaps_steps"]
+        pacing["cut_lattice_step_s"] = al["step_s"]
+        pacing["cut_lattice_residual_ms"] = al["residual_ms"]
 
     total = time.time() - T0
     tm["total"] = round(total, 1)
@@ -641,7 +893,9 @@ def main():
         alignment=al, cuts_on=cuts_on, pacing=pacing, transitions=kinds, blips=dict(count=len(blips), per_minute=round(len(blips) / dur * 60, 1), kinds=collections.Counter("white/bright" if b["luma_jump"] > 0 else "dark" for b in blips),
                                                                            frames=[b["frame"] for b in blips][:40]),
         speed=spd, shake_zoom=sz, text={k: v for k, v in txt.items() if k not in ("covered",)}, colour=col, native=nat, ending=end, suggested=suggested,
-        cuts=[{k: c[k] for k in ("frame", "t", "beat", "offset_ms", "clip_frames", "clip_beats", "note", "kind", "kind_conf", "blur", "on", "xy", "rt", "whip_axis", "L", "R") if k in c} for c in cuts],
+        cuts=[{k: c[k] for k in ("frame", "t", "beat", "offset_ms", "step_idx", "line_t", "clip_frames", "clip_beats", "note", "kind", "kind_conf", "blur", "blur_len", "on", "xy", "rt", "whip_axis", "L", "R") if k in c} for c in cuts],
+        same_song=same, drum_attacks=dict(count=len(attacks), strong_kick_snare=int(len(_strong_attacks(attacks)[0])), strong_rise=STRONG_RISE, bias_ms=bh.BIAS_MS),
+        pops=dict(count=len(pops), frames=pops[:60]), cut_lead=cl, hit_lead=hl, kills=kb, kills_note=kf_note, adopt=adopt,
         timing_seconds=tm, versions=dict(opencv=cv2.__version__, numpy=np.__version__))
     # ---- sheets
     sheets = []
@@ -696,11 +950,13 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
     w("## 2. Beat grid")
     if beat:
         mem = ", ".join("%.2f (strength %.2f, half-beats %.0f %%)" % m for m in beat.get("members", []))
-        w("- Source: %s. **%.2f BPM**, first beat at %.4f s%s." % (r["beat_source"], beat["bpm"], beat["beat0"], "" if not beat.get("weak") else "  (WEAK fit: no clear drum pattern, do not trust)"))
+        w("- Source: %s. **%.2f BPM**, first beat at %.4f s%s." % (r["beat_source"], beat["bpm"], beat["beat0"], "" if not beat.get("weak") else "  (a WEAK fit: no strong drum pattern; kept because the steadiness checks of music_tempo.py agree)"))
         if mem:
             w("- Tempo candidates from `music_tempo.py`: %s. Both members are real readings: a clip of `x` beats at %.2f BPM is `x/2` beats at %.2f." % (mem, beat["bpm"], beat["bpm"] / 2))
         for n_ in beat.get("notes", []):
             w("- note: %s" % n_)
+        if beat.get("grid_adequate") is False:
+            w("- **A constant grid is NOT adequate for this sound** (a wandering tempo or too many hits off the grid): its lattice numbers below are approximate; an edit that copies it must place kills / cuts on measured hit times (`hit(t)`), never on grid lines.")
     else:
         w("- No beat grid: %s." % ("the reference has no sound; pass `--music <song>` to read the pacing in beats" if not info["has_audio"] else "music_tempo.py found no tempo in its sound"))
     if r.get("music"):
@@ -734,10 +990,15 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
             dref = P.get("clip_beats_dist_reference_tempo", d)
             w("- **Typical clip: %g beat** at the reference's %.2f BPM (%d of %d clips)." % (rb, bpm, dref.get(fmt_beats(rb), 0), sum(dref.values())))
     if al and al.get("step") is not None and not al.get("offset_note"):
-        w("- **Cut to beat**: on the %g-beat lattice the cuts sit at a fixed distance from the grid (concentration %.2f; %.2f would be chance). Median offset **%+.0f ms = %+.2f beat = %+.1f frames** (negative = the cut comes BEFORE the hit), spread %.0f ms, 10-90 %% range %+.0f to %+.0f ms; %.0f %% of the cuts are within 40 ms of that offset." % (
-            al["step"], al["concentration"], [t_ for t_ in al["lattice_tests"] if t_["step"] == al["step"]][0]["chance"], al["offset_ms_median"], al["offset_beats_median"], al["offset_frames_median"],
-            al["offset_ms_std"], al["offset_ms_p10"], al["offset_ms_p90"], al["locked_share"] * 100))
-        w("  A cut's time is the start of its first frame (frame / fps). The grid time is the measured onset of the hit (`music_grid.py`).")
+        lt = [t_ for t_ in al["lattice_tests"] if t_["step"] == al["step"]][0]
+        w("- **Cut to beat**: the cuts sit on a lattice of **%g beat = %.4f s = %.1f frames** (`step_s`; concentration %.2f, accepted from %.2f, chance %.2f), at a fixed distance from its lines. Median offset **%+.0f ms = %+.2f frames** (negative = the cut comes BEFORE the line), residual spread %.0f ms, 10-90 %% range %+.0f to %+.0f ms; %.0f %% of the cuts are within %.0f ms of that offset." % (
+            al["step"], al["step_s"], al["step_s"] * fps, al["concentration"], lt["threshold"], lt["chance"], al["offset_ms_median"], al["offset_frames_median"],
+            al["offset_ms_std"], al["offset_ms_p10"], al["offset_ms_p90"], al["locked_share"] * 100, min(40.0, 0.25 * al["step_s"] * 1000)))
+        w("  Lattices tried (concentration): %s. A cut's time is the start of its first frame (frame / fps); the lines are the grid of %s." % (
+            ", ".join("%g beat %.2f%s" % (t_["step"], t_["concentration"], "" if t_["accepted"] else " (rejected)") for t_ in al["lattice_tests"]), r["beat_source"]))
+        w("- **Rhythm in lattice steps** (gap between consecutive cuts, steps: cuts): %s%s. %.0f %% of the gaps are whole steps within %.0f ms. The first cut is %d steps (%.2f s) into the video." % (
+            ", ".join("%s: %d" % kv for kv in al["gaps_steps"].items()), "" if not al.get("gaps_same_step") else "; %d cuts share a line with the cut before (flash cuts 2-3 frames apart)" % al["gaps_same_step"],
+            al["gaps_whole_share"] * 100, max(30.0, 0.2 * al["step_s"] * 1000), r["adopt"]["intro_steps"] if r["adopt"]["intro_steps"] is not None else 0, P["first_cut_s"]))
     elif al and al.get("note"):
         w("- %s" % al["note"])
     elif al:
@@ -745,6 +1006,33 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
             ", ".join("%.2f at %g beat" % (t_["concentration"], t_["step"]) for t_ in al["lattice_tests"]), al["lattice_tests"][0]["chance"]))
     if al and al.get("offset_note"):
         w("- %s" % al["offset_note"])
+    if r.get("same_song") and r["same_song"].get("same"):
+        ss = r["same_song"]
+        w("- **The reference's sound IS your song** (waveform correlation %.2f in %d of %d windows, onset score %.2f against %.2f): its time t is the song's time t %+.4f s; the grid above is the song's own." % (
+            ss["ncc"], ss["windows_good"], ss["windows"], ss["score"], ss["second"], ss["offset_s"]))
+    elif r.get("same_song") and r["same_song"].get("windows") is not None:
+        ss = r["same_song"]
+        w("- The reference's sound is NOT your song (%d of %d waveform windows match any offset)." % (ss["windows_good"], ss["windows"]))
+    cl_, hl_ = r.get("cut_lead") or {}, r.get("hit_lead") or {}
+    if cl_.get("frames") is not None:
+        w("- **Lead before the drum attack**: its cuts come a median **%.1f frames (%.0f ms)** before the kick / snare attack of their lattice line (negative = after it; %d cuts, std %.0f ms, %.0f %% within 1.5 frames of the median) -> `cut_lead_frames = %d`, clamped to 0..3 (the attack is the half-height of the band envelope, one definition for the whole skill)." % (
+            cl_["median_frames"], cl_["median_ms"], cl_["n"], cl_["std_ms"], cl_["stable_share"] * 100, cl_["frames"]))
+    elif cl_:
+        w("- Lead of the cuts before the drum attack: not measurable (%s%s) -> `cut_lead_frames = null`." % (cl_.get("why", "?"), (": median %+.1f frames over %d cuts" % (cl_["median_frames"], cl_["n"])) if cl_.get("median_frames") is not None else ""))
+    if hl_.get("frames") is not None:
+        w("- **Lead of its KILL accents** (%s: %d of %d kills): a median **%.1f frames (%.0f ms)** before the drum attack (negative = after it; std %.0f ms) -> `hit_lead_frames = %d`, clamped to 0..3." % (
+            hl_["source"], hl_["n"], hl_.get("kills", 0), hl_["median_frames"], hl_["median_ms"], hl_["std_ms"], hl_["frames"]))
+    elif hl_:
+        w("- Lead of its KILL accents (pop / muzzle flash of a kill) before the drum attack: **%s** -> `hit_lead_frames = null` (= not measured from kills: the draft keeps its default of 1 frame). Flash frames at cuts are cut evidence (they feed `cut_lead_frames`) and are never used for the kill lead." % hl_.get("note", hl_.get("why", "?")))
+    kb = r.get("kills")
+    if kb:
+        w("- **Kills** (kill feed rows, %d; the row appears about 8 frames after the shot): %.2f per second from the first cut to the fade, median gap %.2f s%s%s." % (
+            kb["count"], r["adopt"]["kills"]["per_s"], kb.get("gap_s_median", 0.0), (" = %.1f lattice steps" % kb["gap_steps_median"]) if kb.get("gap_steps_median") is not None else "",
+            ("; on the lattice every %d steps (concentration %.2f, chance %.2f)" % (kb["lock_steps"], kb["lock_R"], kb["lock_chance"])) if kb.get("lock_R") is not None else ""))
+        npop = sum(1 for k_ in kb["kills"] if k_["pop_frame"] is not None)
+        w("  %d of them have a luma pop (flash) within 25 frames before the row." % npop)
+    elif r.get("kills_note"):
+        w("- Kills: not read (%s)." % r["kills_note"])
     if r.get("cuts_on"):
         co = r["cuts_on"]
         w("- **Cuts on which hits** (%d of %d cuts within 60 ms of a half-beat grid point): %s. Kicks / bass hits are %.0f %% of the half beats in this stretch; %.0f %% of the aligned cuts are on one. -> `CUTS_ON = \"%s\"`." % (
@@ -799,7 +1087,8 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
     w("## 8. Intro and ending")
     first = P["first_cut_s"]
     if first >= 2.0:
-        w("- Intro: no hard cut for the first %.2f s%s: a slow opening, not the cut rhythm of the rest (any change of view inside it is a move of the camera or a soft transition; look at `start_3s.jpg`)." % (first, " (%d beats)" % S["intro_beats"] if S.get("intro_beats") else ""))
+        w("- Intro: no hard cut for the first %.2f s%s: a slow opening, not the cut rhythm of the rest (any change of view inside it is a move of the camera or a soft transition; look at `start_3s.jpg`)." % (
+            first, " (%d lattice steps = %d beats at the reference's tempo)" % (r["adopt"]["intro_steps"], S["intro_beats"]) if (r["adopt"].get("intro_steps") and S.get("intro_beats")) else (" (%d beats)" % S["intro_beats"] if S.get("intro_beats") else "")))
     else:
         w("- No intro: the first cut comes at %.2f s." % first)
     e = r["ending"]
@@ -808,13 +1097,41 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
     elif e["kind"] == "fade to white":
         w("- Ending: **fade to white** from %.2f s." % e["start"])
     else:
-        w("- Ending: **%s** from %.2f s over %.2f s (final luma %.0f of %.0f)%s." % (e["kind"], e["start"], e["seconds"], e["final_luma"], e["base_luma"], (": the dark areas reach black %.2f s before the highlights" % e["p10_to_p90_lag"]) if e["kind"] == "luma fade" else ""))
+        w("- Ending: **%s**: the fade runs **%.2f s** from %.2f s (a luma fade: the dark areas reach black %.2f s before the highlights), then **%.2f s of black** to the end (the %.2f s of gradual dimming of the last take before the fade are not part of it; final luma %.0f of %.0f)." % (
+            e["kind"], e["fade_s"], e["start"], e["p10_to_p90_lag"] if e.get("p10_to_p90_lag") is not None else 0.0, e["black_s"], e["dim_s"], e["final_luma"], e["base_luma"]) if e["kind"] == "luma fade" else
+            "- Ending: **%s**: the fade runs **%.2f s** from %.2f s, then **%.2f s of black** (gradual dimming before the fade: %.2f s; final luma %.0f of %.0f)." % (
+            e["kind"], e["fade_s"], e["start"], e["black_s"], e["dim_s"], e["final_luma"], e["base_luma"]))
     w("")
     w("## 9. Images to read before designing")
     for p, cap in r["sheets"]:
         w("- `%s`: %s" % (p.replace("\\", "/"), cap))
     if not r["sheets"]:
         w("- (sheets skipped)")
+    w("")
+    w("## 10. What the draft takes from this (`ref_notes.json[\"adopt\"]`, version 2)")
+    ad = r["adopt"]
+    w("")
+    w("`draft_ref_timeline.py` reads only this block; every position / length of the reference is in LATTICE STEPS of its own grid, `null` = not measured (the draft then uses its model default and says so).")
+    w("")
+    w("| key | value |")
+    w("|---|---|")
+    lt_ = ad["lattice"]
+    w("| frame | %s |" % ad["frame"])
+    w("| same_song.offset_s | %s |" % ("%+.4f s (song time = reference time + this)" % ad["same_song"]["offset_s"] if ad["same_song"]["offset_s"] is not None else "null (the reference's sound is not the song)"))
+    w("| lattice | %s |" % ("step %.4f s = %g beat of %.2f BPM, locked R %.2f, offset %s, residual %.0f ms" % (lt_["step_s"], lt_["step_beats_ref"], lt_["ref_bpm_read"], lt_["locked_R"],
+                                                                                                       ("%+.2f frames" % lt_["offset_frames"]) if lt_["offset_frames"] is not None else "null", lt_["residual_ms"]) if lt_ else "null (not locked)"))
+    w("| cut_gaps_steps | %s |" % (ad["cut_gaps_steps"] if ad["cut_gaps_steps"] is not None else "null"))
+    w("| cut_rate_per_s | %s |" % ad["cut_rate_per_s"])
+    w("| kills | %s |" % (ad["kills"] if ad["kills"] else "null"))
+    w("| transitions | %s |" % ad["transitions"])
+    w("| slow | %s |" % ad["slow"])
+    w("| intro_steps | %s |" % ad["intro_steps"])
+    w("| ending | %s |" % ad["ending"])
+    w("| look | %s (nearest preset %s) |" % (ad["look"], ad["look_preset"]))
+    w("| words | %s |" % (ad["words"] if ad["words"] else "null"))
+    w("| cut_lead_frames | %s |" % ad["cut_lead_frames"])
+    w("| hit_lead_frames | %s |" % ad["hit_lead_frames"])
+    w("| hit_lead_note | %s |" % ad.get("hit_lead_note"))
     w("")
     w("## SUGGESTED SETTINGS for timeline.py")
     w("")
@@ -836,7 +1153,7 @@ def write_notes(r, cuts, blips, spd, txt, hist, args):
     w("# intro: %s" % ("%d beats before the first cut (R0 = -%d), slow shots" % (S["intro_beats"], S["intro_beats"]) if S["intro_beats"] else "none"))
     w("# words: %s" % ("yes (big words on about %.0f %% of the frames, caps about %.0f %% of the frame height)" % (txt["share"] * 100, txt["cap_height"] * 100) if S["words"] else
                        ("probably no: %d rows of letter-like shapes, but scenery gives those too: look at centre_crops.jpg" % txt["words"] if S.get("words_check") else "no")))
-    w("# ending: %s" % (("luma fade over the last %.1f s -> LUMA_FADE" % e["seconds"]) if e["kind"] == "luma fade" else ("fade to black over the last %.1f s" % e["seconds"] if e["kind"] == "fade to black" else e["kind"])))
+    w("# ending: %s" % (("luma fade %.2f s then %.2f s of black -> LUMA_S, BLACK_S" % (e["fade_s"], e["black_s"])) if e["kind"] == "luma fade" else ("fade to black %.2f s then %.2f s of black" % (e["fade_s"], e["black_s"]) if e["kind"] == "fade to black" else e["kind"])))
     w("```")
     for n_ in suggest_look_notes(r):
         w("- LOOK: %s" % n_)
@@ -857,12 +1174,13 @@ def suggest_look_notes(r):
 
 
 LIMITS = [
-    "Hard cuts are found well (57 of 57 on the worked example, none missed, 3 extra, every one within 1 frame of where it was built). Soft transitions that move BOTH clips (whips through, spins, dissolves, as in the house style) are mostly missed (5 of 13 on the house example): the cut list is then a lower bound.",
+    "Cuts are the first frame of a change of picture, found by thumbnail correlation (test reference, 2000 frames: 73 of the 74 cuts of an independent finder on the same frame, the 74th is the fade to black; 9 more that look real or are settling frames of a blur-in on the strip sheets: 6 real, 3 doubtful). The older rule missed 15 % and put 9 of 60 one to three frames late. Soft transitions that move BOTH clips (whips through, spins, dissolves) can still be missed or counted twice: read ref_sheets around a cut you rely on.",
     "The kind of a blur-in was right for 54 of the 57 cuts of the worked example (30 whips, 15 zoom bursts, 12 rolls as built). A weak blur-in inside a fast clip can read as hard, so the hard-cut share is an upper bound. The sign of a whip is not measurable.",
     "Text is found by letter shapes (no OCR): 66 of the 79 words of the worked example (84 %), 91 % of the finds inside a word's time; the words are never read and neither is whether the letters are see-through or solid: read `centre_crops.jpg` (a mistake made once on small tiles). Scenery (vents, stairs) gives a few false rows: a handful is not text. Letter height reads 10 to 30 % low on see-through letters.",
     "Slow motion is motion magnitude against the clips' own typical speed: a player standing still looks like slow motion.",
     "Colour, shake and zoom numbers are relative to the worked example and the footage's own colour and camera work move them; the LOOK is a first guess, to be checked on enlarged stills of the reference and of the first render.",
-    "The reference's sound is used as it is: a reference whose audio is not the song (voice-over, other music) has another grid than your song's. Without sound the tempo is fitted to the cut times (half / double ambiguity) and no cut-to-beat offset can be read.",
+    "The reference's sound is used as it is: a reference whose audio is not the song (voice-over, other music) has another grid than your song's (unless it IS your song: `same_song`). Without sound the tempo is fitted to the cut times (half / double ambiguity) and no cut-to-beat offset can be read.",
+    "cut_lead_frames is a median over the cuts, hit_lead_frames over the pops / muzzle flashes of the reference's KILLS (kill-feed rows), each whose lattice line carries a kick or snare attack (the half-height of the band envelope, bias-corrected: the skill's one definition); they are null when the leads scatter (under 55 % within 1.5 frames of the median) or when fewer than 8 cuts / 6 kill accents qualify (`hit_lead_note` gives the numbers). Flash frames at cuts never set the kill lead. The kill feed is read for 1920x1080 Valorant only, and its row appears about 8 frames after the shot (a constant lag, so the kill times are for rate, gaps and lock, not for placement).",
 ]
 
 if __name__ == "__main__":

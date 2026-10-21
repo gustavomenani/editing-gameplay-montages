@@ -18,8 +18,12 @@ What happens to each entry (one table line each: original size @ measured frame 
     Nothing is decoded. A 60 fps recording with dropped frames (average rate a little under 60) is linked too: its
     frame indices stay the original's, which the Valorant raw-recording tools (refstyle/detect_kills.py, mykills.py)
     rely on; mkpts.py lists its gaps. Converting it would cost minutes and shift every frame index after the first gap.
-    A song / any audio file: linked as it is (src/music.flac); a song inside a video container is extracted to
-    src/music.flac (a few seconds).
+    A song in a lossless audio file (flac, wav, aiff): linked as it is (src/music.flac / .wav). Any other song (m4a, aac, mp3,
+    ogg, opus ... or a song inside a video container) is decoded ONCE to src/music.flac: a full decode from sample 0 in 24 bit
+    (the container's priming / edit list applied, exactly what the other tools decode), MUSIC in timeline.py points to it, and
+    the line prints the sample count of the source's decode against the flac's (a few seconds; measured on the user's 9.6 M-sample m4a:
+    same count, 0 samples lag, every sample equal except the ~750 where the AAC decode overshoots full scale, which a flac holds at 1.0).
+    Why: ffmpeg seeking (-ss) inside AAC / mp3 lands 8 to 40 ms off the sample, a flac seeks exactly.
   * the same kind of video in another container (.ts .flv .wmv .mts ...), or whose audio starts later / earlier than
     the file (the tools decode the audio from the start of the file, so a late start would put every sound too
     early): REMUXED to src/c1.mkv in seconds, the picture copied bit for bit (same frames, same pts, same indices),
@@ -73,6 +77,7 @@ from ff import FF, FFPROBE
 
 SW, SH, FPS = 1920, 1080, 60
 LINKABLE = (".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi")      # what mkpts.py / kills_auto.py look for in src/
+LOSSLESS_AUDIO = (".flac", ".wav", ".wave", ".aif", ".aiff", ".w64")   # a song in one of these is linked as it is; any other audio file (m4a, aac, mp3, ogg, opus, wma ...) is decoded ONCE to src/music.flac
 TOL = 0.0015                # s: a source frame this close to the wanted time is used unchanged
 MAXGAP = 0.25               # s: a bigger hole between two source timestamps is not interpolated
 EXACT_MAX_S = 90            # clips up to this length default to --exact
@@ -453,6 +458,21 @@ def extract_audio(name, path, a):
     return dst
 
 
+def count_samples(path, stream):
+    """Samples per channel of a full ffmpeg decode of audio stream `stream` (absolute stream index; None = the first) of `path`, as every tool
+    of the skill decodes it (from sample 0, the container's priming / edit list applied), counted without keeping the samples."""
+    cmd = [FF, "-v", "error", "-i", path, "-map", f"0:{stream}" if stream is not None else "0:a:0", "-vn", "-ac", "1", "-f", "f32le", "-"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    n = 0
+    while True:
+        b = p.stdout.read(1 << 22)
+        if not b:
+            break
+        n += len(b)
+    p.wait()
+    return n // 4
+
+
 def link(p, dst):
     """hard link (same drive: instant, no disk space) or, when that is impossible (another drive, a FAT / network
     drive), a copy written under a temporary name so that an interrupted copy is never mistaken for the clip"""
@@ -537,9 +557,18 @@ def ingest_entry(name, p, args, mode):
     if v is None:
         if a is None:
             raise Skip(f"{p} has no sound and no video frames: not a clip or a song ffmpeg can read (corrupt or unfinished recording?)")
-        if ext in LINKABLE:                           # an audio file with a video extension would be taken for a clip
+        lossy_song = is_music and ext not in LOSSLESS_AUDIO
+        if ext in LINKABLE or lossy_song:             # an audio file with a video extension would be taken for a clip; a lossy song is decoded once, here
             dst = extract_audio(name, p, a)
             ent["method"] = "audio"
+            if lossy_song:
+                # ffmpeg seeking in AAC / mp3 (-ss before -i) lands tens of ms off the sample, a decoded flac seeks exactly and every
+                # tool then reads the same samples: the song is decoded once, in full from sample 0, 24 bit (ffmpeg's s32 flac holds 24 bits: no rounding to 16)
+                n_src, n_flac = count_samples(p, a["index"]), count_samples(dst, None)
+                ent["samples"] = n_flac
+                same = "identical" if n_src == n_flac else f"DIFFERENT by {n_flac - n_src:+d}"
+                return ent, (f"lossy song ({ext}) -> decoded once to {dst}, full decode, 24 bit: {n_src} samples in the source decode, "
+                             f"{n_flac} in the flac ({same})  ({time.time() - t_in:.1f} s)"), False
             return ent, f"audio in a {ext} container -> extracted {dst}  ({time.time() - t_in:.1f} s)", False
         for o in glob.glob(os.path.join("src", glob.escape(name) + ".*")):
             os.remove(o)

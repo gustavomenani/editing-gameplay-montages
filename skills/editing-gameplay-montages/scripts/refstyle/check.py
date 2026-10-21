@@ -8,8 +8,9 @@ usage: python check.py video.mp4 [--sheets]
                  (each mapped back to the clip and source frame it shows; the frames beside an inverted impact frame, timeline IMPACT,
                  are not judged: the inversion's own motion fills their neighbourhood); one-frame jumps that no
                  kill, accent (bumps included), cut or transition explains; judder index
- 2. sync_N.jpg   8 frames around every kill, and a printed table of the tile on which each muzzle flash must
-                 first show: +0, +0 only faintly, or +1 when the beat falls after the exposure of frame +0
+ 2. sync_N.jpg   8 frames around every kill (tile +0 = the SHOT frame, nearest_frame of the shown beat, so +0 is where the muzzle flash must first show and -1 where
+                 it must be absent) and, per kill, the MEASURED flash frame: the difference image of the source frames K-1 -> K matched against the master's
+                 frame differences (syncaudit.flash_score); "ok" = on the shot frame, "LATE" / "EARLY" = on another one, "not measurable" = never a pass
  3. --sheets     pv_NN.jpg: the whole video, two frames per beat, labelled with the beat
  4. sound        loudness, true peak, and the decoded sample peak (must stay below 0 dBFS)
 
@@ -30,7 +31,7 @@ For gate.py (the delivery gate): `import check` has no side effects; `analyze(vi
 which source frame the master's picture shows around the beat against the one the timeline asks for (-> list of dicts, nothing printed);
 `faithful(video, frames, T)` does the same around any output frames, to tell a jump or pause that is in the footage (the master matches the
 timeline: a shot that did not kill, an ability, a real pause) from one the render made."""
-import re, subprocess, sys, os, json, math
+import re, subprocess, sys, os, json
 import preflight
 import numpy as np
 import cv2
@@ -52,18 +53,15 @@ class Stop(Exception):
 
 
 def frame_of(beat):
-    return int(round((beat - T.R0) * T.FPB))
+    return T.nearest_frame(beat)
 
 
 def where(n):
     r = T.frame_beat(n)
-    a, b, p, tin = T.active(r)
+    a = T.take_of(n)
     s = T.SEGS[a]
     src, v = s["map"](r)
-    txt = "beat %6.2f  %s source frame %.1f at %.2fx" % (r, s["clip"], float(src), float(v))
-    if b is not None:
-        txt += "  (%s transition into %s)" % (tin[0], T.SEGS[b]["clip"])
-    return txt
+    return "beat %6.2f  %s source frame %.1f at %.2fx" % (r, s["clip"], float(src), float(v))
 
 
 def invert_frames():
@@ -96,9 +94,51 @@ def null(VID, af):
                           capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
 
 
+def measure_flash(VID, cap=None):
+    """The MEASURED muzzle flash of every kill (syncaudit.flash_score): the frame on which the difference image of the source frames K-1 -> K shows in the master, against the shot
+    frame (nearest_frame of the shown beat). Prints one row per kill and returns [dict(beat, hit, level, take, frame, flash, corr, c_prev, verdict)]; verdict "ok" (on the shot frame
+    and absent on -1), "EARLY" / "LATE" (another frame), "spread" (also on -1), "not measurable" (a flat picture, an impact frame, no clip here: never a pass)."""
+    import syncaudit
+    cap = cap or cv2.VideoCapture(VID)
+    out = []
+    tpls = syncaudit.flash_templates([(T.SEGS[i]["clip"], T.SEGS[i]["map"], k, (0, 1920)) for k, lv, i in T.KILLS])          # the source clips are read in parallel
+    print("   hit beat    shot frame  flash on  corr  (on -1)  verdict")
+    for q, (k, lv, i) in enumerate(T.KILLS):
+        e = frame_of(k)
+        grays = {}
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, e - 6))
+        for n in range(max(0, e - 6), e + 8):
+            ok, fr = cap.read()
+            if not ok:
+                break
+            g = cv2.cvtColor(fr[frame.WIN_Y:frame.WIN_Y + frame.WIN_H, :frame.WIN_W], cv2.COLOR_BGR2GRAY)
+            grays[n] = cv2.resize(g, (192, 108), interpolation=cv2.INTER_AREA).astype(np.float32)
+        m = syncaudit.flash_score(*tpls[q], e, lambda n: np.maximum(grays[n] - grays[n - 1], 0) if n in grays and n - 1 in grays else None)
+        f, cp = m["flash"], m["c_prev"]
+        if f is None:
+            kind, verdict = "not measurable", "not measurable (%s)" % (m["err"] or "best correlation %s" % ("%.2f" % m["corr"] if m["corr"] is not None else "-"))
+        elif f < e:
+            kind = verdict = "EARLY: on %+d" % (f - e)
+        elif f > e:
+            kind = verdict = "LATE: on %+d" % (f - e)
+        elif cp is not None and cp >= 0.6 * m["corr"]:
+            kind = verdict = "spread: also on -1"
+        else:
+            kind = verdict = "ok"
+        out.append(dict(beat=k, hit=T.HITS[q][0], level=lv, take=i, frame=e, flash=f, corr=m["corr"], c_prev=cp, verdict=kind.split(":")[0]))
+        print("   %8g  %10d  %8s  %4s  %7s  %s" % (T.HITS[q][0], e, f if f is not None else "n/a", "%.2f" % m["corr"] if m["corr"] is not None else "-", "%.2f" % cp if cp is not None else "-", verdict))
+    n_ok = sum(1 for r in out if r["verdict"] == "ok")
+    print("   in all: %d of %d kills on the shot frame and absent on -1 (ok), %d on another frame (EARLY / LATE), %d spread over two frames, %d not measurable (never a pass)" % (
+        n_ok, len(out), sum(1 for r in out if r["verdict"] in ("EARLY", "LATE")), sum(1 for r in out if r["verdict"] == "spread"), sum(1 for r in out if r["verdict"] == "not measurable")))
+    return out
+
+
 def analyze(VID, T_=None, sheets=False, strips=True):
     global T
     T = T_ if T_ is not None else (T or preflight.timeline())
+    if int(getattr(T, "SYNC", 0)) < 2:
+        raise Stop("check.py: this timeline.py has no SYNC = 2 (the old pipeline: cuts on ceil of their beat, effects in the beat domain). Update the project: copy the current scripts "
+                   "(scripts/, then scripts/refstyle/ over them), copy the SYNC block of the timeline example into timeline.py, draft again and render again (python gate.py says the same)")
     _probe = probe(VID)
     res = dict(exit=0)
     # ---------------------------------------------------------------- 0. fast-forward (timeline maps)
@@ -140,7 +180,7 @@ def analyze(VID, T_=None, sheets=False, strips=True):
     # one-frame jumps are normal on a kill (flash, impact frame), on an accent (exposure pop), on a cut and
     # inside a transition; what is left is usually a shot that did not kill, a flick or an ability
     kills = [frame_of(k) for k, lv, i in T.KILLS]
-    pulses = [frame_of(k) for k, wt in T.PULSES] + [frame_of(b) for b, st in getattr(T, "BUMPS", [])]      # bumps: a light flash on a hit without a kill
+    pulses = [frame_of(k) - T.HIT_LEAD for k, wt in T.PULSES] + [frame_of(b) - T.HIT_LEAD for b, st in getattr(T, "BUMPS", [])]      # bumps (musical beats): a light flash HIT_LEAD frames before the hit
     spans = []
     for j in range(1, len(T.SEGS)):
         r0, dlen = T.SEGS[j]["r0"], T.SEGS[j]["tin"][1]
@@ -176,21 +216,9 @@ def analyze(VID, T_=None, sheets=False, strips=True):
     for s in range(0, len(tiles), 7):
         cv2.imwrite(f"sync_{s // 7}.jpg", np.vstack(tiles[s:s + 7]), [cv2.IMWRITE_JPEG_QUALITY, 86])
     if strips:
-        print("kill strips: sync_0.jpg .. sync_%d.jpg (%d kills, 7 per sheet). Where the flash must first show:" % ((len(tiles) + 6) // 7 - 1, len(tiles)))
-    count = {"+0": 0, "+0 faint": 0, "+1": 0}
-    sync = []
-    for k, lv, i in T.KILLS:
-        x = (k - T.R0) * T.FPB                            # the beat in output frames; frame +0 is round(x)
-        sh = T.SEGS[i]["shutter"]                         # footage shutter of the take, in output frames
-        part = min(1.0, max(0.0, (round(x) + sh / 2 - x) / sh))     # share of frame +0's exposure that lies after the shot
-        key = "+1" if part <= 0 else "+0" if part >= 0.25 else "+0 faint"
-        count[key] += 1
-        sync.append(dict(beat=k, level=lv, take=i, frame=x, tile=key))
-        tile = "+1 (the shot comes after frame +0's exposure)" if part <= 0 else \
-               "+0" if part >= 0.25 else "+0, faint (only %d %% of its exposure is after the shot), full on +1" % max(1, round(100 * part))
-        print("   beat %6g  frame %8.2f  -> %s" % (k, x, tile))
-    print("   in all: %d on +0, %d faint on +0, %d on +1. A flash later than its tile means K or the beat is wrong." % (
-        count["+0"], count["+0 faint"], count["+1"]))
+        print("kill strips: sync_0.jpg .. sync_%d.jpg (%d kills, 7 per sheet). Tile +0 is the shot frame: the muzzle flash must first show there and be absent on -1. Measured:" % (
+            (len(tiles) + 6) // 7 - 1, len(tiles)))
+    sync = measure_flash(VID, cap) if strips else []
     res["sync"] = sync
 
     # ---------------------------------------------------------------- 3. overview sheets
@@ -322,7 +350,7 @@ def alignment(VID, T_=None, back=0, ahead=5):
     cases = []
     for q, (k, lv, i) in enumerate(T.KILLS):
         n0 = frame_of(k)
-        lead = n0 - int(math.ceil((T.SEGS[i]["r0"] - T.R0) * T.FPB - 1e-6))     # output frames from the take's cut to this shot
+        lead = n0 - T.nearest_frame(T.SEGS[i]["r0"])                            # output frames from the take's cut to this shot (both exact frames)
         if lead >= PRE_CLEAR:
             js = list(range(-PRE_N, 0))
         else:
@@ -348,8 +376,8 @@ def faithful(VID, frames, T_=None):
     T = T_ if T_ is not None else (T or preflight.timeline())
     cases = []
     for n in frames:
-        i = T.active(T.frame_beat(n))[0]
-        js = [j for j in range(-2, 3) if 0 <= n + j < T.N_FRAMES and T.active(T.frame_beat(n + j))[0] == i]
+        i = T.take_of(n)
+        js = [j for j in range(-2, 3) if 0 <= n + j < T.N_FRAMES and T.take_of(n + j) == i]
         cases.append((n, i, n, js))
     out = {}
     for n, r in _match(VID, cases).items():

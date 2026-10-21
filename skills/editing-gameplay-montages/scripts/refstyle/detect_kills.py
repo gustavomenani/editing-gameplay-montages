@@ -5,6 +5,10 @@ section on the right. Rows are tracked by the x where the red section starts, so
 flicker does not create duplicate events.
 
 usage: detect_kills.py <src_dir> <out_dir> [name-filter ...]
+
+Every frame of a file must be decoded (frame i = packet i of the file): a decode that comes up short (GPU decoder dying, damaged or
+truncated recording) is retried in software and, if still short, the file is reported as FAILED, no json is written for it, and the
+script exits 1 after the other files are done. A cached json from such a short decode is not trusted: that file is scanned again.
 """
 import concurrent.futures as cf
 import json
@@ -12,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -108,29 +113,56 @@ def row_bands(img):
     return bands
 
 
+MAX_GAP = 2        # frames the decoder may differ from the file's packet count (a cut-off last GOP); anything more is a failed decode
+
+
+def decode(path, hw):
+    """Every frame of the file, scanned for kill-feed bands -> (frames, last ffmpeg messages). hw: GPU decode (-hwaccel auto)."""
+    cmd = [FF, "-v", "error"] + (["-hwaccel", "auto"] if hw else []) + ["-i", path, "-map", "0:v:0",
+           "-vf", f"crop={W}:{H}:{X0}:{Y0}", "-fps_mode", "passthrough",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    frames = []                 # per frame: list of bands
+    fsz = W * H * 3
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, bufsize=W * H * 3 * 8)
+        while True:
+            buf = p.stdout.read(fsz)
+            if len(buf) < fsz:
+                break
+            img = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
+            frames.append(row_bands(img))
+        p.wait()
+        err.seek(0)
+        msg = err.read().decode("utf-8", "replace").strip().splitlines()[-3:]
+    return frames, " | ".join(msg)
+
+
 def scan(path, out_dir):
     name = os.path.basename(path)
     out_json = os.path.join(out_dir, os.path.splitext(name)[0] + ".json")
-    if os.path.exists(out_json):
-        return name, "cached"
     pts = probe_pts(path)
-    cmd = [FF, "-v", "error", "-hwaccel", "auto", "-i", path, "-map", "0:v:0",
-           "-vf", f"crop={W}:{H}:{X0}:{Y0}", "-fps_mode", "passthrough",
-           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=W * H * 3 * 8)
-    frames = []                 # per frame: list of bands
-    fsz = W * H * 3
-    while True:
-        buf = p.stdout.read(fsz)
-        if len(buf) < fsz:
-            break
-        img = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
-        frames.append(row_bands(img))
-    p.wait()
+    if os.path.exists(out_json):
+        try:
+            old = json.load(open(out_json))
+            n_old, n_pts_old = old["n_frames"], old["n_pts"]
+        except (ValueError, KeyError, OSError):
+            n_old, n_pts_old = None, None
+        if n_old is not None and abs(n_pts_old - n_old) <= MAX_GAP and abs(len(pts) - n_old) <= MAX_GAP:
+            return name, "cached"
+        print(f"{name}: the cached {out_json} is bad (decoded {n_old} frames, the file has {len(pts)}): scanning it again", flush=True)
+    if not pts:
+        raise RuntimeError(f"{name}: ffprobe lists no video packets: the file is unreadable or not a video")
+    # The decoder must deliver EVERY frame: frame i is pts[i]. A short decode (GPU decoder dying, damaged file) used to be hidden by an
+    # offset guess and the scan reported "no kills" (one 8110-frame file decoded 10 frames): try again in software, then stop.
+    frames, msg = decode(path, True)
+    if abs(len(pts) - len(frames)) > MAX_GAP:
+        print(f"{name}: GPU decode gave {len(frames)} of {len(pts)} frames ({msg or 'no message'}): decoding again in software", flush=True)
+        frames, msg = decode(path, False)
     n = len(frames)
-    # decoded frame i <-> pts[i] (offset if the decoder dropped leading frames)
-    off = max(0, len(pts) - n)
-    times = [pts[min(i + off, len(pts) - 1)] if pts else i / 60.0 for i in range(n)]
+    if abs(len(pts) - n) > MAX_GAP:
+        raise RuntimeError(f"{name}: decoded {n} frames but the file has {len(pts)}: the file is damaged or truncated"
+                           + (f" (ffmpeg: {msg})" if msg else "") + "; no kills were scanned for it (repair or re-export the recording)")
+    times = [pts[min(i, len(pts) - 1)] for i in range(n)]
 
     # --- track rows by the x where the red (victim) section starts
     TOL = 6
@@ -182,9 +214,21 @@ def main():
         if filters and not any(k in f.lower() for k in filters):
             continue
         todo.append(os.path.join(src_dir, f))
+
+    def safe(p_):
+        try:
+            return scan(p_, out_dir) + (True,)
+        except RuntimeError as e:                    # one bad file must not hide the others: report it, finish the rest, exit 1
+            return os.path.basename(p_), "FAILED: " + str(e), False
+    failed = []
     with cf.ThreadPoolExecutor(max_workers=3) as ex:
-        for name, msg in ex.map(lambda p_: scan(p_, out_dir), todo):
+        for name, msg, ok in ex.map(safe, todo):
             print(f"{name}: {msg}", flush=True)
+            if not ok:
+                failed.append(name)
+    if failed:
+        sys.exit(f"detect_kills.py: {len(failed)} file(s) NOT scanned (decode failed or came up short): {', '.join(failed)}. "
+                 "Their kills are missing from the detections: do not use this scan as complete.")
 
 
 if __name__ == "__main__":

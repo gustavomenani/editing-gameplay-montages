@@ -1,13 +1,22 @@
 """Spectrograms of the finished mix and of its stems, labelled in timeline beats: the editor's "ears".
 Shows whether a riser really ends on its beat, a whoosh sits on its transition, the low-pass sweep
 closes and opens where intended, and whether the game sound is present under the music.
+Marks (same time axis as the picture, exact to the sample; the spectrogram itself is a 46 ms window drawn at its centre, so a
+transient looks smeared by up to +-23 ms: read the marks, not the smear): a triangle at the bottom of every MEASURED ATTACK of the
+song (beat_hits.attacks, the skill's one definition of a hit's time: red kick / bass, green snare body, blue hats), and a white
+line through every row at the musical beat of each kill (T.HITS, where its gunshot sounds): the gunshot's onset in the game stem
+must start on that line, and on a triangle of the song.
 
 usage: python mix_spec.py -5.2 5 59 72      pairs of beats: one block (mix / effects / game) per range
        -> mix_spec.png      (needs mix.wav, stem_sfx.wav, stem_game.wav from audio.py)"""
-import sys, wave
+import os, sys, wave
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import timeline as T
+import beat_hits
+import preflight
+if getattr(T, "SYNC", 0) < preflight.SYNC_NEEDED:
+    sys.exit("mix_spec.py: " + preflight.sync_update_message(getattr(T, "SYNC", 0)))
 
 try:
     font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 15)
@@ -27,7 +36,7 @@ def load(p):
     return (np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, w.getnchannels()).mean(1) / 32768.0).astype(np.float32)
 
 
-def row(x, r0, r1, title, width=2000, sh=260):
+def row(x, r0, r1, title, width=2000, sh=260, marks=()):
     a = max(0, int((r0 - T.R0) * T.PER * SR) - N // 2)
     b = min(len(x), int((r1 - T.R0) * T.PER * SR) + N)
     seg = x[a:b]
@@ -51,6 +60,14 @@ def row(x, r0, r1, title, width=2000, sh=260):
         d.line((xx, 0, xx, sh), fill=(150, 150, 150))
         d.text((xx + 2, 2), str(r), fill=(255, 255, 0), font=font)
     d.text((6, sh - 20), title, fill=(255, 255, 255), font=font)
+    for r, col in marks:                                          # (beat, colour): a triangle for a song attack
+        if r0 <= r <= r1:
+            xx = int((r - r0) / (r1 - r0) * width)
+            d.polygon([(xx - 4, sh - 1), (xx + 4, sh - 1), (xx, sh - 9)], fill=col, outline=(255, 255, 255))
+    for h in KILL_BEATS:                                          # where each kill's gunshot must start
+        if r0 <= h <= r1:
+            xx = int((h - r0) / (r1 - r0) * width)
+            d.line((xx, 0, xx, sh), fill=(255, 255, 255))
     return out
 
 
@@ -64,9 +81,20 @@ for r0, r1 in ranges:
     if r1 <= T.R0 or r0 >= T.R1:
         raise SystemExit("range %g .. %g lies outside the video (beats %g .. %g)" % (r0, r1, T.R0, T.R1))
 mix, fx, game = load("mix.wav"), load("stem_sfx.wav"), load("stem_game.wav")
+KILL_BEATS = [h for h, lv, i in getattr(T, "HITS", [])]          # musical beats of the kills (SYNC 2): where the gunshots sound
+MARKS = []                                                        # the song's own attacks, as (timeline beat, colour)
+if os.path.exists(T.MUSIC):
+    song = beat_hits.decode(T.MUSIC)
+    t_lo = max(0.0, T.beat_time(T.R0) - 1.0)
+    t_hi = min(len(song) / beat_hits.SR, T.beat_time(T.R1) + 1.0)
+    COL = {"low": (255, 80, 80), "mid": (90, 255, 120), "high": (120, 180, 255)}
+    MARKS = [((t - T.BEAT0) / T.PER - T.M0, COL[b]) for t, b, _ in beat_hits.strong_attacks(
+        beat_hits.attacks(song[int(t_lo * beat_hits.SR):int(t_hi * beat_hits.SR)], t_lo))]
+else:
+    print("note: %s not found: no attack marks (only the kill lines)" % T.MUSIC)
 rows = []
 for r0, r1 in ranges:
-    rows += [row(mix, r0, r1, "MIX  beats %g .. %g" % (r0, r1)), row(fx, r0, r1, "effects stem (risers, whooshes)"),
+    rows += [row(mix, r0, r1, "MIX  beats %g .. %g" % (r0, r1), marks=MARKS), row(fx, r0, r1, "effects stem (risers, whooshes)"),
              row(game, r0, r1, "game stem")]
 im = Image.new("RGB", (2000, 264 * len(rows)), (40, 40, 40))
 for i, r in enumerate(rows):

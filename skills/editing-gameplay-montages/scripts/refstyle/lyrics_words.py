@@ -1,5 +1,6 @@
 """lyrics.txt -> the words of the section, in sung order (imported by lyrics_sync.py, lyrics_ctc_align.py and
-cues_from_alignment.py; stdlib only, so it also runs in the separation venv).
+cues_from_alignment.py; stdlib only, so it also runs in the separation venv). The cue of a word is the sung attack of the
+vocal stem (lyrics_attack.py): this file only says which words there are, how they are spelled, and which are pinned.
 
 lyrics.txt = the CONFIRMED words of the part of the song the edit uses, one line per sung line, in song order, every word
 that is sung inside the section (also the ones that stay off screen). Blank lines, lines starting with `#` and
@@ -7,7 +8,8 @@ that is sung inside the section (also the ones that stay off screen). Blank line
   word             sung as typed (accents and case are dropped for the aligner), shown on screen in capitals
   sung=SHOWN       the sung form differs from the text on screen:  takin=TAKING  (an aligner reads letters, not spelling)
   sung=-           aligned but not shown (a word sung over a kill that must stay clear, an ad-lib)
-  word@12.34       pin: the word is sung at timeline beat 12.34 (a word the alignment got wrong; the sync sheet shows which)
+  word@12.34       pin: the word's cue (its sung ATTACK, no advance) is at timeline beat 12.34: for a word the alignment got
+                   wrong or could not decide; lyrics_audit.py and the zoom panels (lyric_sync_sheet.py --zoom) show which
 Punctuation around a word is not shown (a trailing , . ; : and quotes / brackets) except ? and !. Numbers and symbols are
 written as sung ("two", "and" for &). A token with no letter or digit at all (a lone dash) is skipped."""
 import re

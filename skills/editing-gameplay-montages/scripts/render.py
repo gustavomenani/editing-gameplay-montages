@@ -6,6 +6,12 @@ and the camera (zoom / shake / transition moves) is supersampled the same way, s
 All compositing is done in linear light. The strength of vignette, saturation, contrast, grain, bloom, shake, kill zoom, flash,
 colour fringe, impact frames and the colour grade comes from LOOK in timeline.py (look.py; without LOOK the look is the default one).
 
+Timing (timeline.py SYNC = 2): the take on screen, every transition and every kill accent is chosen by output FRAME INDEX, never by a beat
+compare: s["kills"] are the exact frames the shots are shown on (HIT_LEAD frames before their musical hit) and the zoom punch, shake,
+exposure pop, colour fringe, backdrop pulse and impact frames of one shot all start on that frame and are at their peak there (instant
+attack, ring-down after it); the pulses of PULSES (musical beats) are shown the same way; a transition lasts a whole number of frames
+centred on its cut's frame (T.active()).
+
 usage: python render.py n0 n1 out.mp4            frames n0..n1-1 as video (no sound)
        python render.py n0 n1 out.jpg [step]     stills for inspection (one frame: full size; several: contact sheet)"""
 import os, sys, math, glob, subprocess
@@ -31,6 +37,15 @@ DR = 1.0 / T.FPB                     # beats per output frame
 C_WIN = np.array([FG_W / 2, FG_Y + FG_H / 2])
 LIN = ((np.arange(256) / 255.0) ** GAMMA).astype(np.float32)
 SEGS = T.SEGS
+KF = [(T.nearest_frame(k), k, lv) for k, lv, _ in T.KILLS]                  # the frame every shot is SHOWN on, that frame's beat, the level
+PF = [(T.nearest_frame(b) - T.HIT_LEAD, wt) for b, wt in T.PULSES]          # a pulse (musical beat) is shown like a shot: HIT_LEAD frames before its hit
+PF = [(nf, T.frame_beat(nf), wt) for nf, wt in PF]
+
+
+def sgn(n, j):
+    """A fixed pseudo-random direction (+1 / -1) for the shake of the shot on frame n (the same on every render)."""
+    return 1.0 if (n * 37 + j * 11) % 5 < 3 else -1.0
+
 
 ZOOM_A = {1: 0.12 * KZ, 2: 0.17 * KZ, 3: 0.21 * KZ}
 
@@ -105,8 +120,8 @@ class Store:
 
 
 # ---------------------------------------------------------------- camera
-def cam(i, u):
-    """Zoom / offset / roll of the virtual camera over segment i at beat u."""
+def cam(i, u, n):
+    """Zoom / offset / roll of the virtual camera over segment i at beat u, inside output frame n (u is a sub-frame sample)."""
     s = SEGS[i]
     z = ox = oy = th = 0.0
     for k, lv in s["kills"]:
@@ -115,7 +130,7 @@ def cam(i, u):
         if d < 0:
             x = (d + a) / a
             if x > 0:
-                z += A * x * x                                  # accelerate into the hit
+                z += A * x * x                                  # accelerate into the hit: peaks AT the shot
         elif lv == 1:
             x = d / 1.3
             z += A * (0.5 + 0.5 * math.cos(math.pi * min(1.0, x)))   # ease back out
@@ -133,38 +148,40 @@ def cam(i, u):
         z += 0.18 * (1 - max(0.0, (u - s["r0"]) / 0.4)) ** 3
     if i + 1 < len(SEGS) and SEGS[i + 1]["tin"][0] == "zcut" and u > s["r1"] - 0.3:
         z += 0.22 * min(1.0, (u - (s["r1"] - 0.3)) / 0.3) ** 3
-    # accents that depend only on the music position
-    for k, lv, _ in T.KILLS:
-        d = u - k
-        if 0 <= d < 2.5:
-            att = 1 - math.exp(-d / 0.03)
-            env = att * math.exp(-d / 0.22)
+    # accents that depend only on the music position: they exist from the shot's own frame on (a frame-index test, not a beat compare)
+    # and are at their peak ON that frame: instant attack, ring-down after it (the sub-frame samples before the shot inside its frame
+    # count as the shot too, d = 0). The punch and the shake used to ramp up over 2 to 3 frames after the shot.
+    for nk, k, lv in KF:
+        if n < nk:
+            continue
+        d = max(u - k, 0.0)
+        if d < 2.5:
+            env = math.exp(-d / 0.22)
             amp = (5.0, 8.0, 12.0)[lv - 1] * SHAKE
-            ox += amp * env * math.sin(2 * math.pi * 2.7 * d + 1.7 * k)
-            oy += 0.7 * amp * env * math.cos(2 * math.pi * 3.3 * d + 2.3 * k)
-            th += (0.25, 0.4, 0.7)[lv - 1] * SHAKE * env * math.sin(2 * math.pi * 2.2 * d + k)
-            z += 0.02 * KZ * T.punch(d)
-    for k, wt in T.PULSES:
-        z += 0.012 * KZ * wt * T.punch(u - k)
+            ox += sgn(nk, 0) * amp * env * math.cos(2 * math.pi * 2.7 * d)
+            oy += sgn(nk, 1) * 0.7 * amp * env * math.cos(2 * math.pi * 3.3 * d)
+            th += sgn(nk, 2) * (0.25, 0.4, 0.7)[lv - 1] * SHAKE * env * math.cos(2 * math.pi * 2.2 * d)
+            z += 0.02 * KZ * math.exp(-d / 0.30)
+    for nf, pb, wt in PF:
+        if n >= nf:
+            z += 0.012 * KZ * wt * math.exp(-max(u - pb, 0.0) / 0.30)
     return 1.0 + min(z, 0.60), ox, oy, th
 
 
 def look(i, r, n):
-    """Per-frame scalars for segment i: exposure pop, chromatic aberration, saturation, bars, impact."""
+    """Per-frame scalars for segment i: exposure pop, chromatic aberration, saturation, bars, impact. Every effect of a shot starts on its
+    frame and is at its peak there (d = frames since the shot / FPB, an integer frame count: no beat window)."""
     expo, ca, sat, bars, imp = 1.0, 0.0006 * FRINGE, 1.0, 0.0, 0.0
-    for k, lv, _ in T.KILLS:
-        d = r - k
-        if d >= -0.02:
-            d = max(d, 0.0)
+    for nk, k, lv in KF:
+        if n >= nk:
+            d = (n - nk) / T.FPB
             expo += (0.55, 0.9, 1.5)[lv - 1] * FLASH * math.exp(-d / 0.10)
             ca += (0.0035, 0.005, 0.008)[lv - 1] * FRINGE * math.exp(-d / 0.25)
         if lv == 3 and LK["impact"]:
-            df = n - int(round((k - T.R0) * T.FPB))
-            imp = max(imp, {0: 1.0, 1: 0.5}.get(df, 0.0))
-    for k, wt in T.PULSES:
-        d = r - k
-        if d >= 0:
-            expo += 0.12 * FLASH * wt * math.exp(-d / 0.12)
+            imp = max(imp, {0: 1.0, 1: 0.5}.get(n - nk, 0.0))
+    for nf, pb, wt in PF:
+        if n >= nf:
+            expo += 0.12 * FLASH * wt * math.exp(-((n - nf) / T.FPB) / 0.12)
     for a, b in SEGS[i]["skill"]:
         if a < r < b:
             ca += 0.002 * FRINGE * math.sin(math.pi * (r - a) / (b - a))
@@ -312,15 +329,15 @@ def render_frame(n, store):
     e_bg = T.ease5(p) if b is not None else 0.0
     t_bg = tiny[a] if b is None else tiny[a] * np.float32(1 - e_bg) + tiny[b] * np.float32(e_bg)
     pulse = glow = streak = 0.0
-    for k, lv, _ in T.KILLS:
-        d = r - k
-        if d >= 0:
+    for nk, k, lv in KF:
+        if n >= nk:
+            d = (n - nk) / T.FPB
             pulse += (0.5, 0.8, 1.2)[lv - 1] * math.exp(-d / 0.35)
             glow += (0.5, 0.8, 1.3)[lv - 1] * math.exp(-d / 0.40)
             streak += (0.10, 0.22, 0.40)[lv - 1] * math.exp(-d / 0.30)
-    for k, wt in T.PULSES:
-        d = r - k
-        if d >= 0:
+    for nf, pb, wt in PF:
+        if n >= nf:
+            d = (n - nf) / T.FPB
             pulse += 0.30 * wt * math.exp(-d / 0.30)
             glow += 0.35 * wt * math.exp(-d / 0.30)
     slow_dim = 1.0
@@ -335,10 +352,10 @@ def render_frame(n, store):
     hc = CAM_SHUTTER * DR / 2
 
     def geom(i, u):
-        z, ox, oy, th = cam(i, u)
+        z, ox, oy, th = cam(i, u, n)
         zm, al, wt_ = 1.0, 1.0, (0.0, 0.0, 0.0, 1.0)
-        if b is not None:
-            pu = min(1.0, max(0.0, (u - (SEGS[b]["r0"] - tin[1] / 2)) / tin[1]))
+        if b is not None:                                     # progress through the transition's whole frames: p(frame n) = (n - first) / TN, see T.active()
+            pu = min(1.0, max(0.0, (u - SEGS[b]["x0"]) * T.FPB / SEGS[b]["tn"]))
             ta, tb, _ = trans(kind, pu, tin[2] if len(tin) > 2 else (0, 0))
             zm, al, wt_ = ta if i == a else tb
         return z * zm, ox, oy, th, al, wt_

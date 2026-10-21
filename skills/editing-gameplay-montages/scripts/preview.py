@@ -9,12 +9,16 @@ no shutter blur, so slow motion steps), in the frame of the style:
                    an overlapping transition (whip, spin, zoom, dissolve, soft) is a plain cross-fade, the others hard cuts
   reference style  full frame (horizontal), or the 16:9 window over the backdrop when FRAME = "vertical" (frame.py); hard cuts
   both             the words of T.TEXT as plain centred text, a 'PREVIEW' label, the song from MUSIC_T0 with the fade-out
-  --marks          the kill beats: a coloured border on the kill frame (and the 2 after it) and its frame number for a moment
+  --marks          the kill frames (T.KILLS: the frames the shots are SHOWN on): a coloured border on the kill frame (and the 2 after it) and its frame number for a moment
 Needs only timeline.py, clipio.py, ff.py, preflight.py, the clips in src/ and their pts/ tables: nothing from prep.py, so it
 runs the moment `python timeline.py` passes. What it is for: cut places, order, lengths, which kill is on which frame, words
 and sound, before the 15 to 60 minutes of prep.py. What it is NOT for: how the edit looks (zoom, shake, flash, colour, blur,
-slow-motion smoothness, the game sound and the risers are not in it). Output 540p H.264 + AAC, 60 fps, N_FRAMES frames."""
-import argparse, os, queue, subprocess, sys, tempfile, threading, time
+slow-motion smoothness, the game sound and the risers are not in it). Output 540p H.264 + AAC, 60 fps, N_FRAMES frames.
+
+Timing: reference style = the render's own take rule (T.take_of(n), by frame index), the kill marks on the KILLS frames, a word's first letter on
+T.nearest_frame(start) - T.HIT_LEAD. The song is decoded from its first sample and cut at MUSIC_T0 by sample count (an input seek `-ss T -i` is 8 to 40 ms
+late on AAC / m4a), so the preview's audio is exactly the song from MUSIC_T0."""
+import argparse, math, os, queue, subprocess, sys, tempfile, threading, time
 import numpy as np
 import preflight                                  # a clear message when this is not the project's Python
 import cv2
@@ -34,6 +38,9 @@ if os.path.dirname(args.out) and not os.path.isdir(os.path.dirname(args.out)):
 T = preflight.timeline(music=True)
 SEGS, N, FPS = T.SEGS, T.N_FRAMES, int(round(T.FPS))
 REF = "view" in SEGS[0]                          # the reference style's S() has a `view`; the house style's has not
+if REF and getattr(T, "SYNC", 0) < 2:
+    sys.exit("preview.py: timeline.py has no SYNC = 2 (it predates the frame-exact timing contract): copy the timing block of "
+             "scripts/refstyle/timeline_ref_example.py into it, or redraft it with draft_ref_timeline.py.")
 KILLS = getattr(T, "KILLS", [])
 TEXT = getattr(T, "TEXT", [])
 SHORT = []                                       # source ranges the decoder did not deliver in full
@@ -138,9 +145,14 @@ def ease(x):
 plan, lo, hi = [], {}, {}
 for n in range(N):
     r = T.frame_beat(n)
-    a, b, p, tin = T.active(r)
+    if REF:
+        shown = [T.take_of(n)]                                                 # hard cuts, the take chosen by frame index (render.py)
+        p, b = 0.0, None
+    else:
+        a, b, p, tin = T.active(r)
+        shown = [a] if b is None else [a, b]
     layers = []
-    for i in ([a] if b is None else [a, b]):
+    for i in shown:
         nc = clipio.n_frames(SEGS[i]["clip"])
         f = int(min(max(round(float(SEGS[i]["map"](r)[0])), 0), nc - 1))       # the nearest real frame, inside the clip
         layers.append((i, f))
@@ -183,7 +195,8 @@ class Words:
         if self.font_file is None and TEXT:
             print("preview.py: no Impact / Arial font found: the words use PIL's small default font")
         self.cache = {}
-        self.cues = [(int(round((a - T.R0) * T.FPB)), int(round((b - T.R0) * T.FPB)), w, st) for a, b, w, st in TEXT]
+        lead = int(getattr(T, "HIT_LEAD", 0))                       # the first letter comes HIT_LEAD frames before the sung attack's frame (textfx.py)
+        self.cues = [(int(math.floor((a - T.R0) * T.FPB + 0.5)) - lead, int(math.floor((b - T.R0) * T.FPB + 0.5)), w, st) for a, b, w, st in TEXT]
 
     def image(self, j):
         if j not in self.cache:
@@ -221,7 +234,7 @@ class Words:
 
 
 WORDS = Words() if TEXT else None
-KILL_N = sorted((int(round((k - T.R0) * T.FPB)), lv) for k, lv, _ in KILLS)
+KILL_N = sorted((int(math.floor((k - T.R0) * T.FPB + 0.5)), lv) for k, lv, _ in KILLS)       # the frame nearest to the beat the shot is shown on
 TXT_SC = max(0.5, 1.2 * S)                    # size of the labels (cv2 Hershey scale)
 
 
@@ -273,9 +286,9 @@ def encoder(out):
     fo0, fo1 = (T.FADE_OUT[0] - T.R0) * T.PER, (T.FADE_OUT[1] - T.R0) * T.PER
     return subprocess.Popen(
         [FF, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{CW}x{CH}", "-r", str(FPS), "-i", "-",
-         "-ss", f"{T.MUSIC_T0:.4f}", "-t", f"{dur:.4f}", "-i", T.MUSIC, "-map", "0:v", "-map", "1:a:0",
+         "-i", T.MUSIC, "-map", "0:v", "-map", "1:a:0",
          "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv",
-         "-af", f"afade=t=out:st={fo0:.4f}:d={fo1 - fo0:.4f}",
+         "-af", f"asetpts=N/SR/TB,atrim=start={T.MUSIC_T0:.9f}:duration={dur:.6f},asetpts=PTS-STARTPTS,afade=t=out:st={fo0:.4f}:d={fo1 - fo0:.4f}",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-g", "60", "-colorspace", "bt709", "-color_primaries", "bt709",
          "-color_trc", "bt709", "-color_range", "tv", "-c:a", "aac", "-b:a", "128k", "-aac_pns", "0", "-aac_tns", "0", "-aac_is", "0",
          "-movflags", "+faststart", "-t", f"{dur:.4f}", out], stdin=subprocess.PIPE)

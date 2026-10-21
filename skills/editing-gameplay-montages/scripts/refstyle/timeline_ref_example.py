@@ -7,6 +7,7 @@ then smooth slow motion, 2 frames of speed-up and the next cut. Ending: luma fad
 
 Timeline beat 0 = beat 31 of the track = the first 808 hit (track 14.77 s). The big drop is beat 32.
 Source positions are frame indices of the clips (exact, 60 per second)."""
+import bisect
 import math
 import numpy as np
 
@@ -42,8 +43,37 @@ def beat_time(r):
     return BEAT0 + (M0 + r) * PER
 
 
+def hit(t):
+    """The timeline beat of song time t (seconds): how a measured hit (hits.json from music_hits.py) is written into E, so the
+    event lands on the drum itself and not on the grid (a live drummer, a swung or syncopated hit, a grid a few ms off)."""
+    return (t - BEAT0) / PER - M0
+
+
 MUSIC_T0 = beat_time(R0)
 N_FRAMES = int(round((R1 - R0) * FPB))
+SYNC = 2                            # the timing contract of this file (frame-exact pictures, sound on the measured hit): render.py,
+                                    # audio.py and preflight.py refuse a timeline.py without it (copy this block from timeline_ref_example.py)
+
+
+def frame_beat(n):
+    """The beat output frame n shows: frame n is presented at n / 60 s of the video = song time MUSIC_T0 + n / 60."""
+    return R0 + n / FPB
+
+
+def nearest_frame(r):
+    """The output frame whose time is nearest to timeline beat r (|error| <= half a frame = 8.3 ms, no bias)."""
+    return int(math.floor((r - R0) * FPB + 0.5))
+
+
+def vis(r, lead):
+    """Beat of the frame that SHOWS a musical moment at beat r: the frame nearest to r, then `lead` whole frames earlier.
+    Every picture event that belongs to a musical moment (a take's cut, a shot's muzzle flash and its accents, a bump, a white
+    flash-in, a word) is shown on such a frame; the sound of that moment (gunshot, thump, boom, the song itself) stays on the
+    exact beat r. Picture slightly ahead of its sound reads as in sync, picture after it reads as late: the user's reference
+    edit shows its cuts 1.3 to 1.9 frames and its kill flashes 1 frame before the drum attack (CUT_LEAD, HIT_LEAD below)."""
+    return frame_beat(nearest_frame(r) - int(round(lead)))
+
+
 # >>> draft:sound
 SWEEP = None
 RISERS = [dict(a=-4.0, b=0.0, f0=350, f1=7000, curve=1.0, width=1.1, power=2.3, gain=0.10, cut=0.012, seed=1),
@@ -58,19 +88,25 @@ RISERS = [dict(a=-4.0, b=0.0, f0=350, f1=7000, curve=1.0, width=1.1, power=2.3, 
 
 F = FPB
 # >>> draft:cut
-CUT = 0.15                          # a cut sits this many beats before its kill beat: 4 frames at 130 BPM (another tempo: about 4 / FPB)
+CUT = 0.15                          # a cut's musical moment sits this many beats before its kill's hit: 4 frames at 130 BPM (another tempo: about 4 / FPB)
+CUT_LEAD = 1                        # frames a cut is shown BEFORE its musical moment (vis()); the reference: 1.3 to 1.9 frames
+HIT_LEAD = 1                        # frames a shot's muzzle flash and accents, a bump, a white flash-in and a word are shown before their hit
 PUSH = 0.035                        # slow push-in of a take (S(push=...) overrides it)
 # <<< draft:cut
 
 
 # ---------------------------------------------------------------- segments
 def S(clip, a, kills=(), tin=("cut", 0.0), lag=2.0, view=(1.0, 0.0, 0.0), shutter=0.65, mute=False, voice=None,
-      stretch=False, push=None, intro=False, calm=False, white=None, shot_from=None):
+      stretch=False, push=None, intro=False, calm=False, white=None, shot_from=None, hits=None, m0=None):
     """One continuous take.
     a       anchors [(beat, source frame)], eased (TimeMap); FPB source frames per beat is real time. An anchor may carry
             its speed as a third number, (beat, source frame, speed): the map then has exactly that speed there (1 = real time)
             instead of the smoothed one; post() uses it to ease between real time and slow motion without overshoot
-    kills   [(beat, level)] 1 normal, 2 accent, 3 the two big ones; the source frame there is the muzzle-flash frame
+    kills   [(beat, level)] 1 normal, 2 accent, 3 the two big ones; the beat is the one the shot is SHOWN on (vis(): an exact
+            output frame, HIT_LEAD frames before the hit) and the source frame there is the muzzle-flash frame
+    hits    the musical beat of each kill, in the same order (the measured hit: its gunshot, thump and boom sound there);
+            default: the kill beats
+    m0      the musical beat of the take's cut (the picture cuts on vis(m0, CUT_LEAD) = the first anchor); default: the first anchor
     tin     how the take comes in: ("fade", 0) / ("cut", 0) / ("bwhip", 0, +1|-1) / ("bzoom", 0) / ("broll", 0, +1|-1)
             all are hard cuts; the b* kinds add a blur-in that decays over the first frames (render.py)
     lag     unused in this style (audio.py measures each gunshot itself); kept for the shared scripts
@@ -86,7 +122,8 @@ def S(clip, a, kills=(), tin=("cut", 0.0), lag=2.0, view=(1.0, 0.0, 0.0), shutte
     lags = list(lag) if isinstance(lag, (list, tuple)) else [lag] * max(1, len(kills))
     assert len(lags) == max(1, len(kills))
     return dict(clip=clip, a=a, kills=list(kills), slow=None, skill=[], tin=tin, lag=lags, push=PUSH if push is None else push, bars=None,
-                voice=voice, stretch=stretch, mute=mute, view=view, shutter=shutter, intro=intro, calm=calm, white=white, shot_from=shot_from)
+                voice=voice, stretch=stretch, mute=mute, view=view, shutter=shutter, intro=intro, calm=calm, white=white, shot_from=shot_from,
+                hits=[k for k, _ in kills] if hits is None else list(hits), m0=a[0][0] if m0 is None else m0)
 
 
 SLOW_MAX = 1.6          # MAX_SPEED set: beats of slow motion after a shot; a longer take runs on at real time (opts: slow=..., slow=None = to the end)
@@ -183,23 +220,28 @@ def fall(k, K, end, upto, h=8):
 
 
 def flash(b, w=0.36, frames=8.0):
-    """A white flash-in at beat b (the take opens washed out and clears over `frames` output frames). 0.36 at most:
-    0.6-0.9 read as a white blot."""
-    return [(b, w), (b + frames / F, 0.0)]
+    """A white flash-in at the cut on musical beat b: the take opens washed out on that cut's frame (vis(b, CUT_LEAD)) and
+    clears over `frames` output frames. 0.36 at most: 0.6-0.9 read as a white blot."""
+    v = vis(b, CUT_LEAD)
+    return [(v, w), (v + frames / F, 0.0)]
 
 
 # >>> draft:post
 # <<< draft:post
 
 
-# the edit as a list of entries; each take ends where the next one starts
+# the edit as a list of entries; each take ends where the next one starts. Every beat here is MUSICAL (a measured hit, a beat of
+# the song's grid): the SEGS below turn them into the frames that show them (vis(): cuts CUT_LEAD and shots HIT_LEAD frames before
+# their beat) and keep the musical beat for the sound (s["hits"], HITS)
 #   ("shot", start, clip, src_a, src_b, opts)                      no kill (intro)
 #   ("K", kill_beat, clip, K, opts)                                one kill, reference anatomy
 #   ("M", [(beat, K), ...], clip, opts)                            several kills in one continuous take
 #   ("L", start, lead_anchors, kill_beat, clip, K, opts)           custom lead-in (bullet time) into a kill
 # options: upto=frames, h=frames  after the last shot the take shows the death (fall(): real time for h frames, one slow rate that lands
-#   on K + upto at the cut) instead of post(); lb=beats  K / M: the cut sits lb beats before the first shot (default CUT); lvs=(2, 2)  M: a level
-#   per kill; white=flash(b)  a white flash-in; shot_from=(clip, K)  another kill's gunshot; lv, tin, rate, post, slow, n, end, push, ...
+#   on K + upto at the cut) instead of post(); lb=beats  K / M: the cut's musical moment sits lb beats before the first kill's hit
+#   (default CUT); lvs=(2, 2)  M: a level per kill; white=flash(b)  a white flash-in on the cut of musical beat b; shot_from=(clip, K)
+#   another kill's gunshot; post=[(beat, frame), ...] hand anchors after the last shot (musical beats: they move with the shot, the
+#   last one, at the take's end, lands on the next cut); lv, tin, rate, slow, n, end, push, ...
 # >>> draft:entries
 E = [
     # ---- intro: slow, blurred, FULL FRAME, red words. The first render cropped the HUD away with a 1.8-2.2x zoom
@@ -277,21 +319,25 @@ _FX = [("bwhip", 0.0, 1), ("bzoom", 0.0), ("bwhip", 0.0, -1), ("broll", 0.0, 1),
 
 
 def _start(e):
-    if e[0] == "shot":
-        return e[1]
+    """The musical beat of an entry's cut (its picture starts on vis(_start(e), CUT_LEAD))."""
     if e[0] == "K":
         return e[1] - e[-1].get("lb", CUT)
     if e[0] == "M":
         return e[1][0][0] - e[-1].get("lb", CUT)
-    return e[1]
+    return e[1]                                      # "shot" and "L": the start beat
 
 
 SEGS = []
 for _i, _e in enumerate(E):
     _o = dict(_e[-1])
-    _nxt = _start(E[_i + 1]) if _i + 1 < len(E) else R1
-    _end = _o.pop("end", _nxt)
-    assert abs(_end - _nxt) < 1e-9 or _i + 1 == len(E), ("entry %d: 'end' must equal the start of the next take" % _i, _end, _nxt)
+    _last = _i + 1 == len(E)
+    _m0 = _start(_e)
+    _c = vis(_m0, CUT_LEAD)                          # the beat of the frame the cut is shown on
+    _mend = _o.pop("end", None)                      # musical end: the next take's cut (the last take ends at R1)
+    if _mend is None:
+        _mend = R1 if _last else _start(E[_i + 1])
+    _end = _mend if _last else vis(_mend, CUT_LEAD)
+    assert _last or abs(_end - vis(_start(E[_i + 1]), CUT_LEAD)) < 1e-9, ("entry %d: 'end' must equal the start of the next take" % _i, _mend, _start(E[_i + 1]))
     _lv, _n, _rate, _lb = _o.pop("lv", 1), _o.pop("n", None), _o.pop("rate", 0.16), _o.pop("lb", CUT)
     _lvs = _o.pop("lvs", None)                       # M entries: a level per kill (default: 1 ..., then lv on the last)
     _post, _slow = _o.pop("post", None), _o.pop("slow", SLOW_MAX)
@@ -299,32 +345,39 @@ for _i, _e in enumerate(E):
     _pin = (MAX_SPEED,) if MAX_SPEED is not None and MAX_SPEED <= 1.0 else ()      # a ceiling of 1 or less: every kill of an M take plays at it exactly (pinned)
     _o.setdefault("tin", _FX[_i % len(_FX)])
 
-    def _after(k, K):                                # what follows the take's last shot: the plan's anchors, the death (fall) or the reference's post()
-        if _post:
-            return _post
+    def _after(k, K, m):                             # after the last shot (shown at beat k, its hit at beat m): the plan's anchors, the death (fall) or post()
+        if _post:                                    # hand anchors keep their distance to the shot; the one at the take's end lands on the next cut
+            return [((_end if abs(a[0] - _mend) < 1e-9 else a[0] + k - m), float(a[1])) + tuple(float(x) for x in a[2:]) for a in _post]
         return fall(k, K, _end, _upto, _h) if _upto else post(k, K, _end, _rate, slow=_slow)
     if _e[0] == "shot":
-        _a, _k = [(_e[1], float(_e[3])), (_end, float(_e[4]))], []
+        _a, _k, _hb = [(_c, float(_e[3])), (_end, float(_e[4]))], [], []
     elif _e[0] == "K":
-        _k = [(_e[1], _lv)]
-        _a = pre(_e[1], _e[3], _n, _lb) + _after(_e[1], _e[3])
+        _kv = vis(_e[1], HIT_LEAD)
+        _k, _hb = [(_kv, _lv)], [_e[1]]
+        _a = pre(_kv, _e[3], _n, _kv - _c) + _after(_kv, _e[3], _e[1])
     elif _e[0] == "M":
         _ks = _e[1]
-        _k = list(zip([b for b, _ in _ks], _lvs)) if _lvs else [(b, 1) for b, _ in _ks[:-1]] + [(_ks[-1][0], _lv)]
-        _a = pre(_ks[0][0], _ks[0][1], _n, _lb) + [(b, float(q)) + _pin for b, q in _ks[1:]] + _after(_ks[-1][0], _ks[-1][1])
+        _kv = [vis(b, HIT_LEAD) for b, _ in _ks]
+        _hb = [b for b, _ in _ks]
+        _k = list(zip(_kv, _lvs)) if _lvs else [(b, 1) for b in _kv[:-1]] + [(_kv[-1], _lv)]
+        _a = pre(_kv[0], _ks[0][1], _n, _kv[0] - _c) + [(b, float(q)) + _pin for b, (_, q) in zip(_kv[1:], _ks[1:])] + _after(_kv[-1], _ks[-1][1], _ks[-1][0])
     else:
-        _k = [(_e[3], _lv)]
-        _lead = [(a[0], float(a[1])) + tuple(float(x) for x in a[2:]) for a in _e[2]]        # (beat, frame) or (beat, frame, speed)
+        _kv = vis(_e[3], HIT_LEAD)
+        _k, _hb = [(_kv, _lv)], [_e[3]]
+        assert abs(_e[2][0][0] - _e[1]) < 1e-9, ("entry %d: the first lead anchor of an L entry sits on its start beat" % _i, _e[2][0][0], _e[1])
+        _lead = [((_c if _j == 0 else a[0] + _kv - _e[3]), float(a[1])) + tuple(float(x) for x in a[2:])        # (beat, frame) or (beat, frame, speed):
+                 for _j, a in enumerate(_e[2])]                                                                    # they keep their distance to the shot
         if MAX_SPEED is None:
-            if _lead[-1][0] < _e[3] - 2.0 / F:          # bullet time snaps to real time on the last frame, so the flash is on the beat
-                _lead.append((_e[3] - 1.0 / F, _e[5] - 1.0))
-            _a = _lead + [(_e[3], float(_e[5]))]
+            if _lead[-1][0] < _kv - 2.0 / F:          # bullet time snaps to real time on the last frame, so the flash is on its frame
+                _lead.append((_kv - 1.0 / F, _e[5] - 1.0))
+            _a = _lead + [(_kv, float(_e[5]))]
         else:                                            # the lead-in eases up to real time over RAMP frames (draft_ref_timeline.py writes its last anchor)
-            _a = _lead + [(_e[3], float(_e[5]), min(1.0, MAX_SPEED))]
-        _a += _after(_e[3], _e[5])
-    SEGS.append(S(_e[2] if _e[0] in ("shot", "K", "M") else _e[4], _a, kills=_k, **_o))
+            _a = _lead + [(_kv, float(_e[5]), min(1.0, MAX_SPEED))]
+        _a += _after(_kv, _e[5], _e[3])
+    SEGS.append(S(_e[2] if _e[0] in ("shot", "K", "M") else _e[4], _a, kills=_k, hits=_hb, m0=_m0, **_o))
 
-KILLS = [(k, lv, i) for i, s in enumerate(SEGS) for k, lv in s["kills"]]
+KILLS = [(k, lv, i) for i, s in enumerate(SEGS) for k, lv in s["kills"]]                           # the beats the shots are SHOWN on (exact frames)
+HITS = [(m, lv, i) for i, s in enumerate(SEGS) for m, (k, lv) in zip(s["hits"], s["kills"])]     # the musical beat of every kill: where it sounds
 PULSES = []
 
 # ---------------------------------------------------------------- lyric words on screen: (beat in, beat out, text, style)
@@ -391,10 +444,12 @@ for _i, _s in enumerate(SEGS):
     _s["map"] = TimeMap(_s["a"])
     _s["r0"], _s["r1"] = _s["a"][0][0], _s["a"][-1][0]
     _s["x0"], _s["x1"] = _s["r0"], _s["r1"]            # every transition is a hard cut: no overlap
+_TAKE_F = [nearest_frame(_s["r0"]) for _s in SEGS]    # the output frame every take's picture starts on (exact: its cut went through vis())
 
 
-def frame_beat(n):
-    return R0 + n / FPB
+def take_of(n):
+    """Index of the take on screen at output frame n, chosen by frame index (a beat compare would flip a frame late on rounding)."""
+    return max(0, bisect.bisect_right(_TAKE_F, n) - 1)
 
 
 def ease(x):
@@ -414,11 +469,8 @@ def punch(d, attack=0.07, release=0.55):
 
 
 def active(r):
-    """Segment on screen at beat r (same shape as the skill's function: (a, None, 0, None))."""
-    for i, s in enumerate(SEGS):
-        if r < s["r1"]:
-            return i, None, 0.0, None
-    return len(SEGS) - 1, None, 0.0, None
+    """Segment on screen at beat r, read on the frame nearest to r (same shape as the skill's function: (a, None, 0, None))."""
+    return take_of(nearest_frame(r)), None, 0.0, None
 
 
 if __name__ == "__main__":
@@ -443,6 +495,10 @@ if __name__ == "__main__":
             kv = float(s["map"](k)[1])
             if not 0.8 <= kv <= 1.6:
                 print("   note: the shot at beat %g plays at %.2fx: its flash will show late. Add an anchor one frame before it at real time" % (k, kv))
+        for x in [s["r0"]] + [k for k, _ in s["kills"]]:          # the cut and every shot sit exactly on an output frame
+            assert abs((x - R0) * FPB - round((x - R0) * FPB)) < 1e-6, "take %d: beat %r is not on an output frame: build it with vis()" % (i, x)
+        if i:
+            assert _TAKE_F[i] > _TAKE_F[i - 1], "take %d starts on the frame of take %d: no frame of its own" % (i, i - 1)
     assert SEGS[0]["r0"] <= R0 + 1e-9 and SEGS[-1]["r1"] >= R1 - 1e-9
     for a, b, w, st in TEXT:
         assert b > a + 0.2, ("word on screen too briefly", a, b, w)

@@ -1,6 +1,6 @@
 """Writes a correct first draft of a house-style timeline.py from measured inputs; you then read it, look at the stills
 and tweak it (edit-design.md). It does the arithmetic that hand-written timelines get wrong: every kill on a measured
-kick or snare, every transition on a kick (CUTS_ON "bass") or with the kill rhythm ("kills"), the next kill at least
+kick or snare ATTACK, every transition on a kick (CUTS_ON "bass") or with the kill rhythm ("kills"), the next kill at least
 1.5 beats after a transition centre, lead() / tail() shapes, the bullet time that reaches the last kill at real speed,
 the numbering of the music block, anchors inside the clips, speeds inside sane bounds.
 
@@ -20,6 +20,8 @@ plan.json:
    "length_tolerance": 0.10,           # optional, default 0.10 (a fraction of length)
    "lead_in": 4.2,                     # optional: beats of lead-in before the first kill (the riser runs over it)
    "final": "auto",                    # optional: "auto" | "bullet" | "tail": how the last kill is played (see below)
+   "cut_lead_frames": 1,               # optional, 0..3: frames a cut is SHOWN before its musical moment (default: ref_notes.json
+   "hit_lead_frames": 1,               #   "adopt" when there is one, else 1); hit_lead_frames: the same for a shot's flash and accents
    "kills": [                          # in the order they play; clip names are the keys of clips.json
      {"clip": "c10", "K": 5362, "level": 3},                   # K = muzzle-flash frame (kills.json / kill_table.py)
      {"clip": "c10", "K": 5474, "continuous": true},            # same take as the previous kill: one speed ramp between
@@ -28,14 +30,18 @@ plan.json:
    ]}
 Per kill: "level" 1 (default for the middle ones), 2 (slow-motion finisher, ends its take), 3 (opening and last kill only:
 default for them); "continuous" (needs the same clip, a later K, and level 1 on the kill before it); "lag" (frames the
-gunshot trails the picture, kill_lags.py measures it; default 2.0, a placeholder); "end_card" (last kill only);
-"id" instead of "clip" and "K": {"id": 96} takes both from kills.json (a 'guess' / 'ammo-loose' kill is reported).
+gunshot trails the picture: normally leave it out, audio.py measures every kill's gunshot itself and stops on one it cannot
+measure; type it only for such a kill after reading kill_lags.py's strip); "end_card" (last kill only);
+"id" instead of "clip" and "K": {"id": 96} takes both from kills.json. EVERY kill's K must be verified on the picture: kills.json "how" "ammo" /
+"flash" for an entry found by id (else by clip and K), and the plan's K equal to the entry's; no kills.json, no entry, a different K, "ammo-loose" /
+'guess' are all refused unless the plan entry has "k_checked": true, set after looking at kverify.py's sheets (kverify.py plan.json).
 
-What it decides, from the music (beat_hits.py: the measure of music_pulses.py) and the clips' lengths (pts/):
+What it decides, from the music (beat_hits.measure_t: every hit WITH ITS MEASURED ATTACK TIME) and the clips' lengths (pts/):
   * the first kill on the drop (beat -1) with `lead_in` beats of fast-forwarded lead-in and a riser, slow motion after it;
   * every other kill on a kick (low >= 0.5) or a snare (mid >= 0.6), spread so that the edit lasts `length`;
-  * cuts between takes on kicks that carry no kill (CUTS_ON "bass") or free (0.1 beat grid, "kills"), always at least
-    1.5 beats before the next kill, 0.5 beat of real time after a normal kill before the transition starts;
+  * cuts between takes on kicks that carry no kill (CUTS_ON "bass") or on a 1/4-beat line of the song, at the measured
+    attack on that line when there is one ("kills"), always at least 1.5 beats before the next kill, 0.5 beat of real time
+    after a normal kill before the transition starts (both with two frames of margin: the rules are checked on the SHOWN frames);
   * speeds: lead-ins 1.0 to 1.5x (the longer the lead-in, the closer to real time), speed ramps between continuous
     kills 0.9 to 3.7x on average (peaks stay under 4.6x), slow motion 0.28x, bullet time 0.18x, nothing outside 0.15x .. 4.6x;
   * the last kill: on a bass re-entry after a break (no kick in the 3 beats before) it comes in as bullet time with the
@@ -44,11 +50,16 @@ What it decides, from the music (beat_hits.py: the measure of music_pulses.py) a
     bullet time; soft into the end card;
   * R0 / R1 / FADE_OUT / M0, PULSES (every strong hit without a kill or transition), RISERS, SWEEP.
 
+Timing (timeline.py SYNC = 2): every beat it writes is MUSICAL and exact to 9 decimals: a kill is hit(t) of the measured attack of its
+kick / snare (not the half-beat grid time: a live drummer's hit is 5 to 25 ms off the grid), a "bass" cut is the kick's own attack, a
+"kills" cut the attack on its 1/4-beat line (the grid line when nothing sounds there), R0 is the first hit minus the lead-in, R1 and
+FADE_OUT are lines of the song's grid (an ending has no hit). timeline_example.py's loop after SEGS turns them into the frames that show
+them (a cut CUT_LEAD frames, a shot HIT_LEAD frames before the nearest frame of its beat); the sound stays on the exact beat.
+
 It refuses, with the numbers, when the inputs cannot fit: too few kicks or snares, a clip without enough footage before
 or after a kill, a length that the kills cannot fill. The file is built from timeline_example.py by replacing the blocks
-between its `# >>> draft:...` / `# <<< draft:...` markers (docstring, music block, sound block, segments). The `lag` values
-are placeholders until kill_lags.py has measured them. Few kills for a long edit give long lead-ins and long slow motion:
-the statistics it prints (against the house example with --compare) say so."""
+between its `# >>> draft:...` / `# <<< draft:...` markers (docstring, music block, cut block, sound block, segments). Few kills
+for a long edit give long lead-ins and long slow motion: the statistics it prints (against the house example with --compare) say so."""
 import argparse, bisect, collections, hashlib, json, math, os, re, sys
 import numpy as np
 import preflight                                  # a clear message when this is not the project's Python
@@ -72,6 +83,8 @@ SOFT = 1.2
 ROT = [("whip", 0.7, (1, 0)), ("zoom", 0.6), ("whip", 0.7, (-1, 0)), ("spin", 0.8, (1, 0)), ("whip", 0.7, (0, -1)),
        ("zoom", 0.7), ("whip", 0.7, (0, 1)), ("whip", 0.7, (-1, 0))]
 MAXGAP = 16.0
+FRAME_EPS = 2          # frames of margin on the spacing rules: they are measured in beats on the musical times, a cut and a shot each round to
+                       # a frame and a transition to an even number of frames, and verify() checks them on the SHOWN frames of the built module
 
 
 def die(errors, what="cannot draft this plan"):
@@ -120,24 +133,21 @@ def load_plan(path):
     if not isinstance(ks, list) or len(ks) < 2:
         E.append("a draft needs at least 2 kills (the opening one on the drop and the last one)")
         die(E)
-    kills = []
+    kills, db, unverified = [], preflight.kills_db(), []
     for i, k in enumerate(ks):
         tag = "kill #%d" % (i + 1)
-        if "id" in k:                                  # {"id": 96}: clip and K from kills.json
-            try:
-                e = json.load(open("kills.json", encoding="utf-8-sig")).get(str(k["id"]))
-            except (OSError, ValueError) as ex:
-                E.append("%s: \"id\" needs kills.json in this folder (%s)" % (tag, ex))
-                continue
+        if "id" in k:                                  # {"id": 96}: clip and K default to the kills.json entry
+            e = db.get(str(k["id"]))
             if not e:
-                E.append("%s: kills.json has no entry %r" % (tag, k["id"]))
+                E.append("%s: kills.json has no entry %r%s" % (tag, k["id"], "" if db else " (no readable kills.json in this folder)"))
                 continue
             k = dict(k, clip=k.get("clip", e["clip"]), K=k.get("K", e["K"]))
-            if e.get("conf") in ("guess", "ammo-loose"):
-                print("note: %s (kills.json %s) has confidence %r: look at its flash frame before trusting it" % (tag, k["id"], e["conf"]))
         if "clip" not in k or "K" not in k:
             E.append('%s needs "clip" and "K" (or an "id" of kills.json)' % tag)
             continue
+        why_k = preflight.k_check(db, dict(clip=k["clip"], K=int(k["K"]), **({"id": k["id"]} if "id" in k else {})))     # the plan's own K, id or not
+        if why_k and not k.get("k_checked"):
+            unverified.append("%s (%s K=%s: %s)" % (tag, k["clip"], k["K"], why_k))
         try:
             n = clipio.n_frames(k["clip"])
         except FileNotFoundError as e:
@@ -170,8 +180,11 @@ def load_plan(path):
                          "stays in); give that kill level 1 or drop the flag" % (tag, p["level"]))
         if "end_card" in k and not last:
             E.append('%s: "end_card" belongs to the last kill' % tag)
-        kills.append(dict(i=i, clip=k["clip"], K=K, n=n, level=lv, cont=cont, lag=float(k.get("lag", 2.0)),
+        kills.append(dict(i=i, clip=k["clip"], K=K, n=n, level=lv, cont=cont, lag=(float(k["lag"]) if "lag" in k else None),
                           card=k.get("end_card"), has_lag="lag" in k))
+    if unverified:
+        E.append("%d kill(s) with a K that is not verified on the picture (a frame off is 16.7 ms of desync): %s. %s" % (
+            len(unverified), "; ".join(unverified[:8]) + (" ..." if len(unverified) > 8 else ""), preflight.K_HELP))
     if E:
         die(E)
     return P, kills
@@ -189,21 +202,40 @@ def tail_len(lv, T, final):
     lo, hi, pref = (TAIL_FINAL if final else TAIL)[lv]
     if T < lo - 1e-9 or T > hi + RUN_MAX + 1e-9:
         return None
-    return (T, 0.0) if T <= hi + 1e-9 else (pref, round(T - pref, 4))
+    return (T, 0.0) if T <= hi + 1e-9 else (pref, round(T - pref, 9))
 
 
 class Planner:
-    def __init__(self, P, kills, rows, R0, window, final_mode):
+    def __init__(self, P, kills, rows, att, att4, R0, window, final_mode):
+        """rows / att: beat_hits.measure_t on the half-beat lattice (att.bands[b][band] = the attack TIME of the hit on row b); att4: the same on
+        the 1/4-beat lattice (only read for CUTS_ON "kills": the attack near a cut line). Every beat the planner decides with is the MUSICAL one:
+        hit(t) of the attack, to 9 decimals; the lattice beat is only the key of the row."""
         self.P, self.kills, self.N = P, kills, len(kills)
         self.per = 60.0 / P["bpm"]
         self.F = 60 * self.per
+        self.eps = FRAME_EPS / self.F                    # margin of the spacing rules (see FRAME_EPS)
+        self.lead_min = LEAD_MIN + self.eps
         self.bass = P["cuts_on"] == "bass"
         self.R0, self.window = R0, window
         self.low = {r[0]: r[1] for r in rows}
         self.mid = {r[0]: r[2] for r in rows}
         beats = sorted(self.low)
-        self.kp = [b for b in beats if -1.0 <= b <= window - 6.0 and (self.low[b] >= KILL_LOW or self.mid[b] >= KILL_MID)]
-        self.kicks = [b for b in beats if self.low[b] >= CUT_LOW]
+        self.hit = lambda t: round((t - P["beat0"]) / self.per - P["M0"], 9)
+        self.kt, self.ct = {}, {}                        # lattice beat -> musical beat of the hit that carries a kill / a bass cut there
+        for b in beats:
+            tb = att.bands.get(b, {})
+            if self.low[b] >= KILL_LOW and "low" in tb:
+                self.kt[b] = self.hit(tb["low"])
+            elif self.mid[b] >= KILL_MID and "mid" in tb:
+                self.kt[b] = self.hit(tb["mid"])
+            if self.low[b] >= CUT_LOW and "low" in tb:
+                self.ct[b] = self.hit(tb["low"])
+        self.kp = [b for b in beats if -1.0 <= b <= window - 6.0 and b in self.kt]
+        self.kicks = sorted(self.ct)
+        self.tl = self.tr = None
+        if not self.bass:                                # every measured attack (any band), to put a cut on the one that sounds on its line
+            ev = sorted((t, rise) for t, band, rise in att4.all)
+            self.tl, self.tr = np.array([e[0] for e in ev]), np.array([e[1] for e in ev])
         self.final_mode = final_mode
         self.kinds = self._kinds()
 
@@ -248,7 +280,7 @@ class Planner:
                 return None
             need = (L - 1) * F * BULLET + 0.36 * F + 1 + d / 2 * F * BULLET
             return (0.35 * (L - 5.5) ** 2, None) if K - need >= MARGIN else None
-        if not LEAD_MIN - 1e-9 <= L <= LEAD_MAX + 1e-9:
+        if not self.lead_min - 1e-9 <= L <= LEAD_MAX + 1e-9:
             return None
         for f in fasts or lead_fasts(L):
             need = SETTLE * F + (L - SETTLE) * F * f + d / 2 * F * f
@@ -288,23 +320,51 @@ class Planner:
             return None
         return cost, run, tot, spec
 
+    def line_beat(self, c):
+        """-> (musical beat, measured): the 1/4-beat line c of the song's grid carries a cut; a measured attack of any band within half a frame
+        of the line is its moment (the strongest one), and the grid line itself where nothing sounds there."""
+        tl = self.P["beat0"] + (self.P["M0"] + c) * self.per
+        i = int(np.searchsorted(self.tl, tl - 0.5 / 60 - 1e-9))
+        best = None
+        while i < len(self.tl) and self.tl[i] <= tl + 0.5 / 60 + 1e-9:
+            if best is None or self.tr[i] > best[1]:
+                best = (float(self.tl[i]), float(self.tr[i]))
+            i += 1
+        return (self.hit(best[0]), True) if best else (round(c, 9), False)
+
     def cut_candidates(self, lo, hi):
+        """-> [(lattice key, musical beat, measured)] of the places a cut may sit with its musical beat in lo .. hi: the kicks (bass) or
+        the 1/4-beat lines (kills)"""
         if hi < lo - 1e-9:
             return []
         if self.bass:
-            a, b = bisect.bisect_left(self.kicks, lo - 1e-9), bisect.bisect_right(self.kicks, hi + 1e-9)
-            return self.kicks[a:b]
-        return [j / 10.0 for j in range(int(math.ceil(lo * 10 - 1e-6)), int(math.floor(hi * 10 + 1e-6)) + 1)]
+            return [(c, self.ct[c], True) for c in self.kicks if lo - 1e-9 <= self.ct[c] <= hi + 1e-9]
+        out = []
+        for j in range(int(math.ceil(lo * 4 - 0.5)), int(math.floor(hi * 4 + 0.5)) + 1):
+            c = j / 4.0
+            m, meas = self.line_beat(c)
+            if lo - 1e-9 <= m <= hi + 1e-9:
+                out.append((c, m, meas))
+        return out
+
+    def snap(self, x, lo, hi):
+        """A line of the song's grid (1/2, then 1/4, then 1/8 beat) nearest x inside lo .. hi: R1 and FADE_OUT have no hit to sit on."""
+        for st in (0.5, 0.25, 0.125):
+            a, b = int(math.ceil(lo / st - 1e-9)), int(math.floor(hi / st + 1e-9))
+            if a <= b:
+                return min(max(int(round(x / st)), a), b) * st
+        return round(0.5 * (lo + hi), 9)
 
     def max_after(self, kill, final=False):
         return 6.0 + (SOFT if final else 0.7) / 2 if kill["level"] == 1 else (TAIL_FINAL if final else TAIL)[kill["level"]][1] + RUN_MAX
 
     # -- one pair of consecutive kills
     def pair(self, ia, pa, pb):
-        """-> (cost, detail) or None. Between kill ia (at beat pa) and kill ia + 1 (at pb)."""
+        """-> (cost, detail) or None. Between kill ia (on row pa) and kill ia + 1 (on row pb); beats are the musical ones."""
         a, b = self.kills[ia], self.kills[ia + 1]
         F = self.F
-        g = pb - pa
+        ka, kb = self.kt[pa], self.kt[pb]
+        g = kb - ka
         if b["cont"]:
             D = b["K"] - a["K"]
             best = None
@@ -329,40 +389,41 @@ class Planner:
         d = kind[1] if kind[0] != "zcut" else 0.0
         dh = d / 2
         best = None
-        for c in self.cut_candidates(pa + 0.5 + max(dh, 0.3), min(pa + self.max_after(a), pb - LEAD_MIN)):
-            T, L = c - pa, pb - c
+        for cl, c, meas in self.cut_candidates(ka + 0.5 + max(dh, 0.3) + self.eps, min(ka + self.max_after(a), kb - self.lead_min)):
+            T, L = round(c - ka, 9), round(kb - c, 9)
             e = self.end_option(a, T, d)
             if e is None:
                 continue
             l = self.lead_option(b["K"], L, d, bullet)
             if l is None:
                 continue
-            cost = e[0] + l[0]
+            cost = e[0] + l[0] - (0.15 if meas and not self.bass else 0.0)       # kills mode: a line where something sounds beats a bare grid line
             if best is None or cost < best[0]:
-                best = (cost, dict(type="cut", c=c, T=T, L=L, f=l[1], end=e[3], kind=kind, bullet=bullet, d=d))
+                best = (cost, dict(type="cut", c=c, cl=cl, T=T, L=L, f=l[1], end=e[3], kind=kind, bullet=bullet, d=d, meas=meas))
         return best
 
     def terminal(self, p, R1_t, R1_lo, R1_hi):
-        """The last kill at p: the end of its take (the cut to the end card) and R1. -> (cost, detail) or None"""
+        """The last kill on row p: the end of its take (the cut to the end card) and R1. -> (cost, detail) or None"""
         k = self.kills[-1]
         F = self.F
+        kp_ = self.kt[p]
         out = None
-        for e in self.cut_candidates(p + 0.5 + SOFT / 2, p + self.max_after(k, True)):
-            T = e - p
+        for cl, e, meas in self.cut_candidates(kp_ + 0.5 + SOFT / 2 + self.eps, kp_ + self.max_after(k, True)):
+            T = round(e - kp_, 9)
             en = self.end_option(k, T, SOFT, final=True)
             if en is None:
                 continue
             lo, hi = max(e + CARD[0], R1_lo), min(e + CARD[1], R1_hi)
             if lo > hi + 1e-9:
                 continue
-            R1 = min(max(round(min(max(R1_t, lo), hi), 1), lo), hi)
+            R1 = self.snap(min(max(R1_t, lo), hi), lo, hi)
             card_f = (R1 - e + SOFT / 2) * F * 0.31
             E0 = k["card"] if k["card"] is not None else min(k["K"] + 100, k["n"] - 1 - MARGIN - card_f)
             if E0 < k["K"] + en[1] + 3 or E0 + card_f > k["n"] - 1 - MARGIN:
                 continue
             cost = en[0] + 0.05 * (R1 - R1_t) ** 2 + 0.1 * (R1 - e - 4.6) ** 2
             if out is None or cost < out[0]:
-                out = (cost, dict(e=e, T=T, end=en[3], R1=R1, E0=int(E0), card_f=card_f))
+                out = (cost, dict(e=e, el=cl, T=T, end=en[3], R1=R1, E0=int(E0), card_f=card_f))
         return out
 
     # -- the search: dp[i][p] = (cost, previous position) with kill i on beat p
@@ -431,27 +492,33 @@ def kind_name(kind):
     return kind[0]
 
 
+def fb(x):
+    """A musical beat as written into timeline.py: 9 decimals (an exact decimal, so a take's last anchor equals the next take's first one)."""
+    return fnum(x, 9)
+
+
 def end_part(kill, pa, spec):
-    """text of the anchors that end a take after `kill` at beat pa"""
+    """text of the anchors that end a take after `kill` whose hit is at musical beat pa"""
     K = kill["K"]
     if spec[0] == "hold":
-        return "[(%s, %d + %s * F)]" % (fnum(pa + spec[1]), K, fnum(spec[1]))
+        return "[(%s, %d + %s * F)]" % (fb(pa + spec[1]), K, fb(spec[1]))
     if spec[0] == "holdx":
         T = spec[1]
-        return "[(%s, %d + 1.0 * F), (%s, %d + %s * F)]" % (fnum(pa + 1.0), K, fnum(pa + T), K, fnum(1.0 + (T - 1.0) * EXT))
+        return "[(%s, %d + 1.0 * F), (%s, %d + %s * F)]" % (fb(pa + 1.0), K, fb(pa + T), K, fnum(1.0 + (T - 1.0) * EXT))
     _, Tt, out_rate, run_t = spec
-    txt = "tail(%s, %d, %s, hold=%s, out_rate=%s)" % (fnum(pa), K, fnum(Tt), fnum(TAIL_HOLD), fnum(out_rate))
+    txt = "tail(%s, %d, %s, hold=%s, out_rate=%s)" % (fb(pa), K, fb(Tt), fnum(TAIL_HOLD), fnum(out_rate))
     if run_t > 0:
         mid = Tt - TAIL_HOLD - 0.4
         frames = TAIL_HOLD + mid * SLOW + 0.4 * out_rate + run_t
-        txt += " + [(%s, %d + %s * F)]" % (fnum(pa + Tt + run_t), K, fnum(frames))
+        txt += " + [(%s, %d + %s * F)]" % (fb(pa + Tt + run_t), K, fnum(frames))
     return txt
 
 
 def build(P, kills, pl, pos, term, R0):
-    """-> (segments [(text, explanation lines)], final_bullet)"""
+    """-> (segments [(text, explanation lines)], final_bullet). pos = the lattice row of each kill; pl.kt[row] its musical beat."""
     N, F = len(kills), pl.F
     det = {i: pl.pair(i - 1, pos[i - 1], pos[i])[1] for i in range(1, N)}
+    kb = [pl.kt[p] for p in pos]                                  # the musical beat of every kill (the measured attack, 9 decimals)
     takes, cur = [], [0]
     for i in range(1, N):
         if det[i]["type"] == "cut":
@@ -460,7 +527,16 @@ def build(P, kills, pl, pos, term, R0):
         else:
             cur.append(i)
     takes.append(cur)
-    hit = lambda b: ("kick low %.2f" % pl.low[b]) if pl.low.get(b, 0.0) >= KILL_LOW else ("snare mid %.2f" % pl.mid.get(b, 0.0))
+
+    def hit(b):                                                   # what carries the kill on row b, and how far the attack is from the grid
+        what = ("kick low %.2f" % pl.low[b]) if pl.low.get(b, 0.0) >= KILL_LOW else ("snare mid %.2f" % pl.mid.get(b, 0.0))
+        return "%s, attack %+.1f ms from the grid" % (what, (pl.kt[b] - b) * pl.per * 1000) if b in pl.kt else what
+
+    def cut_hit(d):                                               # what a cut sits on
+        if pl.bass:
+            return "kick low %.2f, attack %+.1f ms from the grid" % (pl.low[d["cl"]], (d["c"] - d["cl"]) * pl.per * 1000)
+        return ("on the attack at the 1/4-beat line %s (%+.1f ms from it)" % (fnum(d["cl"]), (d["c"] - d["cl"]) * pl.per * 1000)) if d["meas"] else \
+            ("on the 1/4-beat line %s of the grid (nothing sounds there)" % fnum(d["cl"]))
     segs = []
     final_bullet = det[N - 1]["type"] == "cut" and det[N - 1]["bullet"]
     for t, idx in enumerate(takes):
@@ -471,72 +547,75 @@ def build(P, kills, pl, pos, term, R0):
             f0 = next((f for f in (1.3, 1.15, 1.0) if pl.lead_option(k0["K"], P["lead_in"], 0.0, fasts=(f,)) is not None), None)
             if f0 is None:
                 die("kill #1 (%s K=%d) has too little footage before it for a %s-beat lead-in" % (k0["clip"], k0["K"], fnum(P["lead_in"])))
-            parts.append("lead(%s, %d, %s, fast=%s)" % (fnum(pos[0]), k0["K"], fnum(P["lead_in"]), fnum(f0)))
+            parts.append("lead(%s, %d, %s, fast=%s)" % (fb(kb[0]), k0["K"], fb(P["lead_in"]), fnum(f0)))
             tin, start = ("fade", 0.0), R0
             lines.append("opening: the best kill on the drop (track beat %d = beat %s, %s); %s beats of lead-in at %.2fx under a riser" % (
-                P["drop_beat"], fnum(pos[0]), hit(pos[0]), fnum(P["lead_in"]), f0))
+                P["drop_beat"], fb(kb[0]), hit(pos[0]), fnum(P["lead_in"]), f0))
         else:
             d0 = det[i0]
             start, tin = d0["c"], d0["kind"]
-            why_cut = ("on %s without a kill" % hit(d0["c"])) if pl.bass else "free, with the kill rhythm"
+            why_cut = ("on %s without a kill" % cut_hit(d0)) if pl.bass else ("free, with the kill rhythm, %s" % cut_hit(d0))
             if d0["bullet"]:
-                parts.append("bullet(%s, %d, %s)" % (fnum(pos[i0]), k0["K"], fnum(d0["L"])))
+                parts.append("bullet(%s, %d, %s)" % (fb(kb[i0]), k0["K"], fb(d0["L"])))
                 lines.append("cut centre at beat %s, %s: %s into the bullet time of the last kill (%s beats of slow motion that arrive at real speed)" % (
-                    fnum(d0["c"]), why_cut, kind_name(tin), fnum(d0["L"])))
+                    fb(d0["c"]), why_cut, kind_name(tin), fnum(d0["L"])))
             else:
-                parts.append("lead(%s, %d, %s, fast=%s)" % (fnum(pos[i0]), k0["K"], fnum(d0["L"]), fnum(d0["f"])))
+                parts.append("lead(%s, %d, %s, fast=%s)" % (fb(kb[i0]), k0["K"], fb(d0["L"]), fnum(d0["f"])))
                 lines.append("cut centre at beat %s, %s: %s into clip %s; the kill comes %s beats later (lead-in at %.2fx)" % (
-                    fnum(d0["c"]), why_cut, kind_name(tin), k0["clip"], fnum(d0["L"]), d0["f"]))
+                    fb(d0["c"]), why_cut, kind_name(tin), k0["clip"], fnum(d0["L"]), d0["f"]))
         for j in idx:
             if j != i0:
                 dj = det[j]
-                ka, Ka, kb, Kb = pos[j - 1], kills[j - 1]["K"], pos[j], kills[j]["K"]
+                ka, Ka, kbj, Kb = kb[j - 1], kills[j - 1]["K"], kb[j], kills[j]["K"]
                 if dj["mode"] == "full":
                     h = dj["h"]
                     parts.append("[(%s, %d + %s * F), (%s, %d - %s * F), (%s, %d)]" % (
-                        fnum(ka + h), Ka, fnum(h), fnum(kb - SETTLE), Kb, fnum(SETTLE), fnum(kb), Kb))
+                        fb(ka + h), Ka, fnum(h), fb(kbj - SETTLE), Kb, fnum(SETTLE), fb(kbj), Kb))
                     lines.append("continuous: real time for %s beat after kill %d, then %.2fx until half a beat before kill %d" % (
                         fnum(h), j, dj["sm"], j + 1))
                 else:
-                    parts.append("[(%s, %d)]" % (fnum(kb), Kb))
-                    lines.append("continuous: %.2fx straight from kill %d to kill %d (%s beats apart)" % (dj["sd"], j, j + 1, fnum(kb - ka)))
-            lines.append("kill %d on beat %s: %s (level %d)" % (j + 1, fnum(pos[j]), hit(pos[j]), kills[j]["level"]))
+                    parts.append("[(%s, %d)]" % (fb(kbj), Kb))
+                    lines.append("continuous: %.2fx straight from kill %d to kill %d (%s beats apart)" % (dj["sd"], j, j + 1, fnum(kbj - ka)))
+            lines.append("kill %d on beat %s: %s (level %d)" % (j + 1, fb(kb[j]), hit(pos[j]), kills[j]["level"]))
         if t + 1 < len(takes):
             end_spec, end_beat = det[takes[t + 1][0]]["end"], det[takes[t + 1][0]]["c"]
         else:
             end_spec, end_beat = term["end"], term["e"]
-        parts.append(end_part(kl, pos[il], end_spec))
+        parts.append(end_part(kl, kb[il], end_spec))
         extra = {}
         if end_spec[0] == "tail":
             Tt, run_t = end_spec[1], end_spec[3]
-            extra["slow"] = "(%s, %s)" % (fnum(pos[il]), fnum(pos[il] + Tt))
-            extra["push"] = "[(%s, %s, %s)]" % (fnum(pos[il]), fnum(pos[il] + Tt - 0.2), "0.12" if kl["level"] == 3 else ("0.10" if Tt > 2 else "0.07"))
-            extra["bars"] = "(%s, %s)" % (fnum(pos[il] + TAIL_HOLD - 0.1), fnum(pos[il] + Tt - 0.4))
+            extra["slow"] = "(%s, %s)" % (fb(kb[il]), fb(kb[il] + Tt))
+            extra["push"] = "[(%s, %s, %s)]" % (fb(kb[il]), fb(kb[il] + Tt - 0.2), "0.12" if kl["level"] == 3 else ("0.10" if Tt > 2 else "0.07"))
+            extra["bars"] = "(%s, %s)" % (fb(kb[il] + TAIL_HOLD - 0.1), fb(kb[il] + Tt - 0.4))
             lines.append("after the shot: real time %s beat (recoil, flash), %s beats of %.2fx slow motion%s" % (
                 fnum(TAIL_HOLD), fnum(Tt - TAIL_HOLD), SLOW, (", then %s beats of real time to the cut" % fnum(run_t)) if run_t else
                 (", back to %.2fx for the cut" % end_spec[2])))
         elif end_spec[0] == "hold":
             lines.append("after the last kill: %s beat%s of real time before the cut (the banner is seen)" % (fnum(end_spec[1]), "" if end_spec[1] == 1 else "s"))
         else:
-            lines.append("after the last kill: real time for 1 beat, then %.2fx to the cut at beat %s" % (EXT, fnum(end_beat)))
-        lines.append("take ends at beat %s%s" % (fnum(end_beat), (", " + hit(end_beat)) if pl.bass else ""))
+            lines.append("after the last kill: real time for 1 beat, then %.2fx to the cut at beat %s" % (EXT, fb(end_beat)))
+        lines.append("take ends at beat %s%s" % (fb(end_beat), (", kick low %.2f" % pl.low[det[takes[t + 1][0]]["cl"]]) if pl.bass and t + 1 < len(takes) else ""))
         lags = [kills[j]["lag"] for j in idx]
-        lag_txt = fnum(lags[0], 2, True) if len(lags) == 1 else "[" + ", ".join(fnum(x, 2, True) for x in lags) + "]"
-        ktxt = "[" + ", ".join("(%s, %d)" % (fnum(pos[j]), kills[j]["level"]) for j in idx) + "]"
+        lag_txt = None if all(x is None for x in lags) else (
+            fnum(lags[0], 2, True) if len(lags) == 1 else "[" + ", ".join("None" if x is None else fnum(x, 2, True) for x in lags) + "]")
+        ktxt = "[" + ", ".join("(%s, %d)" % (fb(kb[j]), kills[j]["level"]) for j in idx) + "]"
         text = '    S("%s", %s,\n      kills=%s' % (k0["clip"], " +\n      ".join(parts), ktxt)
         if "slow" in extra:
             text += ", slow=%s" % extra["slow"]
-        text += ", tin=%s, lag=%s" % (tin_text(tin), lag_txt)
+        text += ", tin=%s" % tin_text(tin)
+        if lag_txt is not None:
+            text += ", lag=%s" % lag_txt
         if "push" in extra:
             text += ",\n      push=%s, bars=%s" % (extra["push"], extra["bars"])
         text += "),"
-        segs.append((text, ["segment %d (%s): beats %s .. %s" % (len(segs), k0["clip"], fnum(start), fnum(end_beat))] + lines))
+        segs.append((text, ["segment %d (%s): beats %s .. %s" % (len(segs), k0["clip"], fb(start), fb(end_beat))] + lines))
     kl = kills[-1]
     e, R1, E0 = term["e"], term["R1"], term["E0"]
-    segs.append(('    S("%s", [(%s, %d), (%s, %d + %s * F * 0.31)], tin=("soft", %s), lag=1.5, mute=True),' % (
-        kl["clip"], fnum(e), E0, fnum(R1), E0, fnum(R1 - e), fnum(SOFT)),
+    segs.append(('    S("%s", [(%s, %d), (%s, %d + %s * F * 0.31)], tin=("soft", %s), mute=True),' % (
+        kl["clip"], fb(e), E0, fb(R1), E0, fb(R1 - e), fnum(SOFT)),
         ["segment %d (%s): end card, beats %s .. %s: no zoom, it only fades to black with the music (banner frame %d, %s)" % (
-            len(segs), kl["clip"], fnum(e), fnum(R1), E0, "from the plan" if kl["card"] is not None else "K + 100, or the last footage of the clip")]))
+            len(segs), kl["clip"], fb(e), fb(R1), E0, "from the plan" if kl["card"] is not None else "K + 100, or the last footage of the clip")]))
     return segs, final_bullet
 
 
@@ -565,18 +644,17 @@ def exec_timeline(src, name="draft"):
 
 # ------------------------------------------------------------------------------------------------ statistics and checks
 def speed_shares(ns):
-    segs, R0, F = ns["SEGS"], ns["R0"], ns["FPB"]
+    segs, F = ns["SEGS"], ns["FPB"]
     v = []
     for k in range(ns["N_FRAMES"]):
-        r = R0 + k / F
-        i = next((j for j, s in enumerate(segs) if r < s["r1"]), len(segs) - 1)
-        v.append(float(segs[i]["map"](r)[1]))
+        r = ns["frame_beat"](k)
+        v.append(float(segs[ns["active"](r)[0]]["map"](r)[1]))
     v = np.array(v)
     return dict(slow=float((v < 0.85).mean()), real=float(((v >= 0.85) & (v <= 1.25)).mean()), fast=float((v > 1.25).mean()),
                 vmin=float(v.min()), vmax=float(v.max()))
 
 
-def stats(ns, rows=None):
+def stats(ns, rows=None, att=None):
     segs = ns["SEGS"]
     kinds = collections.Counter(x["tin"][0] for x in segs[1:])
     beats = ns["R1"] - ns["R0"]
@@ -586,7 +664,7 @@ def stats(ns, rows=None):
                transitions=sum(kinds.values()), kinds=dict(kinds), **speed_shares(ns))
     if rows is not None:
         by = {r[0]: r for r in rows}
-        out["transitions_on_kick"] = sum(1 for x in segs[1:] if round(x["r0"] * 2) / 2 in by and by[round(x["r0"] * 2) / 2][1] >= 0.4)
+        out["transitions_on_kick"] = sum(1 for x in segs[1:] if round(x.get("m0", x["r0"]) * 2) / 2 in by and by[round(x.get("m0", x["r0"]) * 2) / 2][1] >= 0.4)
     return out
 
 
@@ -599,11 +677,16 @@ def print_stats(title, st):
               (", %d on a kick" % st["transitions_on_kick"]) if "transitions_on_kick" in st else ""))
 
 
-def verify(ns, rows, cuts_on):
-    """Independent check of the finished module against the rules of edit-design.md, measured on its TimeMaps."""
+def verify(ns, rows, att, cuts_on):
+    """Independent check of the finished module against the rules of edit-design.md, measured on its TimeMaps and on the SHOWN frames
+    (s["kills"], s["r0"]: exact frames; s["hits"], s["m0"]: the musical beats the sound sits on)."""
     errs, warns = [], []
     segs = ns["SEGS"]
+    F, nf = ns["FPB"], ns["nearest_frame"]
     by = {r[0]: r for r in rows}
+    tt = np.array(sorted(t for t, b, rs in att.all))          # every measured attack of the window: a kill / bass cut must sit on one
+    t_of = lambda r: ns["BEAT0"] + (ns["M0"] + r) * ns["PER"]
+    on_attack = lambda r: len(tt) and float(np.abs(tt - t_of(r)).min()) < 0.0006
     for i, s in enumerate(segs):
         if i and abs(s["r0"] - segs[i - 1]["r1"]) > 1e-9:
             errs.append("segment %d does not start where segment %d ends" % (i, i - 1))
@@ -615,26 +698,32 @@ def verify(ns, rows, cuts_on):
             errs.append("segment %d (%s): frames %.1f .. %.1f leave the clip (0..%d)" % (i, s["clip"], p.min(), p.max(), n - 1))
         if v.max() > 4.6 or v.min() < 0.15:
             errs.append("segment %d: speed %.2f .. %.2f outside 0.15 .. 4.6" % (i, v.min(), v.max()))
-        for k, lv in s["kills"]:
+        for (k, lv), m in zip(s["kills"], s["hits"]):
             kv = float(s["map"](k)[1])
             if abs(kv - 1) > 0.15:
-                warns.append("segment %d: the kill at beat %g is reached at %.2fx, not at real speed" % (i, k, kv))
-            b = by.get(k)
+                warns.append("segment %d: the kill at beat %g is reached at %.2fx, not at real speed" % (i, m, kv))
+            b = by.get(round(m * 2) / 2)
             if b is None or (b[1] < 0.25 and b[2] < 0.4):
-                errs.append("kill at beat %g is not on a kick or a snare" % k)
+                errs.append("kill at beat %g is not on a kick or a snare" % m)
+            elif not on_attack(m):
+                errs.append("kill at beat %g is on no measured attack (the beat is not hit(t) of a drum attack)" % m)
+            if nf(m) - ns["HIT_LEAD"] != nf(k):
+                errs.append("kill at beat %g is not shown HIT_LEAD frames before its hit" % m)
         if i:
-            first = min((k for k, _ in s["kills"]), default=None)
-            if first is not None and first - s["r0"] < 1.5 - 1e-9:
-                errs.append("segment %d: the first kill is %.2f beats after the transition centre (needs 1.5)" % (i, first - s["r0"]))
+            first = min((nf(k) for k, _ in s["kills"]), default=None)
+            cut_f = nf(s["r0"])
+            if first is not None and (first - cut_f) / F < 1.5 - 1e-9:
+                errs.append("segment %d: the first kill is shown %.2f beats after the transition centre (needs 1.5)" % (i, (first - cut_f) / F))
             prev = segs[i - 1]
             if prev["kills"] and prev["kills"][-1][1] == 1:
-                after = s["r0"] - s["tin"][1] / 2 - prev["kills"][-1][0]
+                after = (cut_f - s["tn"] // 2 - nf(prev["kills"][-1][0])) / F
                 if after < 0.5 - 1e-9:
                     errs.append("segment %d: only %.2f beats of real time between the kill before it and the transition" % (i, after))
             if cuts_on == "bass":
-                half = round(s["r0"] * 2) / 2
-                if abs(half - s["r0"]) > 1e-9 or half not in by or by[half][1] < 0.4:
-                    errs.append("the transition into segment %d at beat %g is not on a kick" % (i, s["r0"]))
+                u = round(s["m0"] * 2) / 2
+                tl = att.bands.get(u, {}).get("low")
+                if tl is None or abs((tl - ns["BEAT0"]) / ns["PER"] - ns["M0"] - s["m0"]) > 1e-6 or u not in by or by[u][1] < 0.4:
+                    errs.append("the transition into segment %d at beat %g is not on a kick's attack" % (i, s["m0"]))
     return errs, warns
 
 
@@ -661,6 +750,31 @@ def footage_problems(P, kills, F):
     return E
 
 
+def lead_frames(P):
+    """-> ({"CUT_LEAD": n, "HIT_LEAD": n}, [what each came from]). Precedence per trait: the user's words (plan.json) > the reference
+    (ref_notes.json "adopt": cut_lead_frames / hit_lead_frames, what its cuts and kill flashes show before the beat) > 1 frame (the
+    measured convention of the user's reference edit: a picture one frame ahead of its sound reads as in sync)."""
+    adopt = {}
+    if os.path.isfile("ref_notes.json"):
+        try:
+            adopt = (json.load(open("ref_notes.json", encoding="utf-8-sig")).get("adopt") or {})
+        except (OSError, ValueError):
+            adopt = {}
+    out, why = {}, []
+    for key, name in (("cut_lead_frames", "CUT_LEAD"), ("hit_lead_frames", "HIT_LEAD")):
+        if key in P:
+            v, src = P[key], "plan.json"
+        elif adopt.get(key) is not None:
+            v, src = adopt[key], "ref_notes.json (the reference)"
+        else:
+            v, src = 1, "the default 1 frame" + (" (ref_notes.json could not measure it)" if "adopt" in adopt or key in adopt else "")
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 3:
+            die('%s = %r must be a whole number of frames 0..3' % (key, v), "cannot read the plan")
+        out[name] = v
+        why.append("%s = %d from %s" % (name, v, src))
+    return out, why
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("plan")
@@ -670,6 +784,7 @@ def main():
     ap.add_argument("--compare", default=None, help="another timeline .py to print statistics for (e.g. timeline_example.py)")
     args = ap.parse_args()
     P, kills = load_plan(args.plan)
+    LEADS, lead_why = lead_frames(P)
     if not os.path.isfile(args.example):
         die("%s not found: run this from the project folder (scripts/*.* copied into it)" % args.example)
     tpl = open(args.example, encoding="utf-8").read()
@@ -684,7 +799,8 @@ def main():
     per = 60.0 / P["bpm"]
     F = 60 * per
     M0 = int(round(P["drop_beat"])) + 1
-    R0 = round(-1.0 - P["lead_in"], 1)
+    P["M0"] = M0
+    R0 = round(-1.0 - P["lead_in"], 1)           # while planning: the nominal start (the final R0 is the first hit minus the lead-in, below)
     bt = lambda r: P["beat0"] + (M0 + r) * per
     m = beat_hits.decode(P["music"])
     dur = len(m) / beat_hits.SR
@@ -709,8 +825,9 @@ def main():
 
     window, chosen = R1_hi, None
     for attempt in range(4):          # plan on the measured hits of exactly the window the final R1 gives (music_pulses.py's)
-        rows = beat_hits.measure(m, P["bpm"], P["beat0"], M0, R0, window)
-        pl = Planner(P, kills, rows, R0, window, P["final"] if not kills[-1]["cont"] else "tail")
+        rows, att = beat_hits.measure_t(m, P["bpm"], P["beat0"], M0, R0, window)
+        att4 = beat_hits.measure_t(m, P["bpm"], P["beat0"], M0, R0, window, sub=4)[1] if P["cuts_on"] == "kills" else None
+        pl = Planner(P, kills, rows, att, att4, R0, window, P["final"] if not kills[-1]["cont"] else "tail")
         if -1.0 not in pl.kp:
             r = {x[0]: x for x in rows}[-1.0]
             die("the drop (track beat %d = timeline beat -1) carries no kick or snare: low %.2f, mid %.2f (a kill needs low >= %.1f or mid >= %.1f). "
@@ -747,8 +864,9 @@ def main():
         pk = pl.pick(R1_t, R1_lo, window)
         if pk is None:
             wide = min(rmax, R0 + L_t * 2)         # what the kills could reach at all, for the message
-            rows2 = beat_hits.measure(m, P["bpm"], P["beat0"], M0, R0, wide)
-            pl2 = Planner(P, kills, rows2, R0, wide, pl.final_mode)
+            rows2, att2 = beat_hits.measure_t(m, P["bpm"], P["beat0"], M0, R0, wide)
+            att42 = beat_hits.measure_t(m, P["bpm"], P["beat0"], M0, R0, wide, sub=4)[1] if P["cuts_on"] == "kills" else None
+            pl2 = Planner(P, kills, rows2, att2, att42, R0, wide, pl.final_mode)
             pl2.run()
             lo, hi = pl2.reach()
             if lo is None:
@@ -762,18 +880,23 @@ def main():
         total, p_last, term = pk
         R1 = term["R1"]
         if abs(R1 - window) < 1e-9:
-            chosen = (pl, rows, p_last, term)
+            chosen = (pl, rows, att, p_last, term)
             break
         window = R1_lo = R1_hi = R1
     if chosen is None:
         die("the measured hits changed between passes; run again with a slightly different length")
-    pl, rows, p_last, term = chosen
+    pl, rows, att, p_last, term = chosen
     pos = pl.backtrack(p_last)
+    kb = [pl.kt[p] for p in pos]                                    # the musical beat of every kill
     R1 = term["R1"]
-    FADE_OUT = (round(R1 - 2.8, 1), R1)
+    R0 = round(kb[0] - P["lead_in"], 9)                              # the video starts where the first take's lead-in starts: a musical beat, not the 0.1 grid
+    if bt(R0) < 0:
+        die("the first hit (beat %s) minus a %s-beat lead-in puts the video %.3f s before the start of the song: choose a later drop or a shorter lead_in" % (
+            fb(kb[0]), fnum(P["lead_in"]), -bt(R0)))
+    FADE_OUT = (pl.snap(R1 - 2.8, R1 - 3.3, R1 - 2.3), R1)           # the ramps start on a line of the song's grid (an ending has no hit)
     segs, final_bullet = build(P, kills, pl, pos, term, R0)
 
-    bpm_txt = "%.1f" % P["bpm"] if float(P["bpm"]) == int(P["bpm"]) else fnum(float(P["bpm"]))
+    bpm_txt = fnum(float(P["bpm"]), 9, True)
     music_blk = (
         'MUSIC = "%s"\n'
         "BPM, BEAT0 = %s, %s          # tempo, and the time of the track's first beat (music_grid.py measures BEAT0)\n"
@@ -785,45 +908,53 @@ def main():
         "FADE_OUT = (%s, %s)             # picture and music fade to black over these beats\n"
         'CUTS_ON = "%s"                    # where transitions land: "bass" (kicks / 808s only, the default) or "kills" (with the\n'
         "                                    # kill rhythm): the user's choice in the briefing; music_pulses.py checks it.\n") % (
-        P["music"], bpm_txt, fnum(P["beat0"]), M0, P["drop_beat"], F, fnum(R0, 4, True), fnum(R1, 4, True),
-        fnum(FADE_OUT[0], 4, True), fnum(FADE_OUT[1], 4, True), P["cuts_on"])
+        P["music"], bpm_txt, fnum(P["beat0"], 9), M0, P["drop_beat"], F, fnum(R0, 9, True), fnum(R1, 9, True),
+        fnum(FADE_OUT[0], 9, True), fnum(FADE_OUT[1], 9, True), P["cuts_on"])
+    cut_blk = ("CUT_LEAD = %d                        # frames a cut / transition centre is shown BEFORE its musical moment (vis()); the reference: 1.3 to 1.9 frames\n"
+               "HIT_LEAD = %d                        # frames a shot's muzzle flash and accents and a pulse are shown before their hit\n") % (
+        LEADS["CUT_LEAD"], LEADS["HIT_LEAD"])
     riser1 = "dict(a=%s, b=%s, f0=350, f1=7000, curve=1.0, width=1.1, power=2.3, gain=0.13, cut=0.012, seed=1)" % (
-        fnum(R0 + 0.2, 4, True), fnum(pos[0], 4, True))
+        fnum(R0 + 0.2, 9, True), fb(kb[0]))
     if final_bullet:
-        kf = pos[-1]
-        sweep = "[(%s, 18000), (%s, 1000), (%s, 620), (%s, 620)]" % (fnum(kf - 4.7), fnum(kf - 3.0), fnum(kf - 0.4), fnum(kf))
+        kf = kb[-1]
+        sweep = "[(%s, 18000), (%s, 1000), (%s, 620), (%s, 620)]" % (fb(kf - 4.7), fb(kf - 3.0), fb(kf - 0.4), fb(kf))
         riser2 = ",\n          dict(a=%s, b=%s, f0=300, f1=9000, curve=1.3, width=1.2, power=2.0, gain=0.20, cut=0.010, seed=2)" % (
-            fnum(kf - 4.4), fnum(kf))
+            fb(kf - 4.4), fb(kf))
     else:
         sweep, riser2 = "[]", ""
     sound_blk = ("# sound design tied to this piece of music (audio.py); use None / [] to switch off\n"
                  "SWEEP = %s     # low-pass on the music: (beat, cutoff Hz)\n"
                  "RISERS = [%s%s]\n") % (sweep, riser1, riser2)
     segs_txt = "SEGS = [\n" + "\n".join(
-        "".join("    # %s\n" % l for l in ex if not l.startswith("take ends")) + text for text, ex in segs) + "\n]\n" \
-        'KILLS = [(k, lv, i) for i, s in enumerate(SEGS) for k, lv in s["kills"]]\n'
+        "".join("    # %s\n" % l for l in ex if not l.startswith("take ends")) + text for text, ex in segs) + "\n]\n"
     doc = ('"""The edit, expressed in beats of the music: drafted by draft_timeline.py from %s (plan %s), to be read and\n'
            "tweaked, not trusted blindly. %d kills, %.0f s, CUTS_ON \"%s\", timeline beat 0 = beat %d of the track.\n"
+           "Every beat in SEGS is MUSICAL (the measured attack of a hit, 9 decimals); the loop after SEGS shows them on exact frames.\n"
            'Source positions are frame indices of the clips (exact, 60 per second)."""') % (
         os.path.basename(args.plan), hashlib.sha1(open(args.plan, "rb").read()).hexdigest()[:8], len(kills), (R1 - R0) * per, P["cuts_on"], M0)
     src = re.sub(r'\A""".*?"""', lambda mm: doc, tpl, count=1, flags=re.S)
     src = replace_block(src, "music", music_blk)
+    src = replace_block(src, "cut", cut_blk)
     src = replace_block(src, "sound", sound_blk)
     src = replace_block(src, "segs", segs_txt + "PULSES = []\n")
     ns = exec_timeline(src)
     # PULSES: the strong hits that carry neither a kill nor a transition (weight 0.5 .. 0.9)
-    kb = [k for k, _, _ in ns["KILLS"]]
-    ctr = [s["r0"] for s in ns["SEGS"][1:]]
+    kbm = [m_ for m_, _, _ in ns["HITS"]]
+    ctr = [s["m0"] for s in ns["SEGS"][1:]]
     pulses = []
     for r in rows:
-        b, s = r[0], max(r[1], r[2])
-        if not R0 <= b <= R1 or s < 0.6 or any(abs(b - x) < 0.5 for x in kb) or any(abs(b - x) < 0.3 for x in ctr):
+        tb = att.bands.get(r[0], {})
+        t = tb.get("low") if (r[1] >= r[2] and "low" in tb) else tb.get("mid")
+        if t is None:
             continue
-        if final_bullet and pos[-1] - 4.7 < b < pos[-1]:
+        b, s = ns["hit"](t), max(r[1], r[2])                         # a pulse sits on its measured attack, not on the half beat
+        if not R0 <= b <= R1 or s < 0.6 or any(abs(b - x) < 0.5 for x in kbm) or any(abs(b - x) < 0.3 for x in ctr):
             continue
-        pulses.append((b, round(min(0.9, max(0.5, 0.5 + 0.4 * (s - 0.6) / 0.4)), 1)))
+        if final_bullet and kb[-1] - 4.7 < b < kb[-1]:
+            continue
+        pulses.append((round(b, 9), round(min(0.9, max(0.5, 0.5 + 0.4 * (s - 0.6) / 0.4)), 1)))
     lines, cur = [], "PULSES = ["
-    items = ["(%s, %s)" % (fnum(b), fnum(w, 1)) for b, w in pulses]
+    items = ["(%s, %s)" % (fb(b), fnum(w, 1)) for b, w in pulses]
     for j, it in enumerate(items):
         piece = it + ("," if j + 1 < len(items) else "")
         if len(cur) + len(piece) + 1 > 118:
@@ -834,13 +965,14 @@ def main():
     src = replace_block(src, "segs", segs_txt + "# accents without a kill: (beat, weight): the strong kicks / snares that carry neither a kill nor a transition\n"
                         + "\n".join(lines) + "\n")
     ns = exec_timeline(src)
-    errs, warns = verify(ns, rows, P["cuts_on"])
+    errs, warns = verify(ns, rows, att, P["cuts_on"])
     if errs:
         die(errs, "built a draft that fails its own check (a bug, or inputs it cannot handle)")
     open(args.out, "w", encoding="utf-8", newline="\n").write(src + SUM + hashlib.sha1(src.encode("utf-8")).hexdigest() + "\n")
 
     print("music: %s  %s BPM  BEAT0 %s  drop at track beat %d -> M0 %d (the drop is beat -1); R0 %s, R1 %s = %.1f s (asked %.0f s); CUTS_ON = %r" % (
-        P["music"], bpm_txt, fnum(P["beat0"]), P["drop_beat"], M0, fnum(R0), fnum(R1), (R1 - R0) * per, P["length"], P["cuts_on"]))
+        P["music"], bpm_txt, fnum(P["beat0"], 9), P["drop_beat"], M0, fb(R0), fb(R1), (R1 - R0) * per, P["length"], P["cuts_on"]))
+    print("lead: %s; %s" % (lead_why[0], lead_why[1]))
     print("hits in the window: %d that can carry a kill (kick low >= %.1f or snare mid >= %.1f), %d kicks that can carry a transition" % (
         len(pl.kp), KILL_LOW, KILL_MID, len(pl.kicks)))
     for _, ex in segs:
@@ -852,8 +984,8 @@ def main():
     for w in warns:
         print("note:", w)
     if not all(k["has_lag"] for k in kills):
-        print("note: every lag is the placeholder 2.0 frames: run kill_lags.py after ranges.py / prep.py and put its values in")
-    st = stats(ns, rows)
+        print("note: no lag is typed: audio.py measures every gunshot's own lag (kill_lags.py shows the strips); a kill it cannot measure stops it, then read the strip and type S(lag=...)")
+    st = stats(ns, rows, att)
     print("wrote %s: %d segments, %d frames, %.2f s, music from %.3f s" % (args.out, len(ns["SEGS"]), ns["N_FRAMES"], (R1 - R0) * per, ns["MUSIC_T0"]))
     print_stats("draft", st)
     if args.compare and os.path.isfile(args.compare):
@@ -869,7 +1001,7 @@ def main():
         print("note: %.1f kills per 10 s (house example: 5.9): a sparse edit gets long lead-ins, long slow motion and long stretches of real time; "
               "add kills (about %d for %.0f s at the house example's pace) or ask for fewer seconds" % (
                   st["kills_per_10s"], int(math.ceil(5.9 * P["length"] / 10)), P["length"]))
-    print("next: $PY timeline.py (must pass), $PY music_pulses.py (none / none), $PY ranges.py; then kill_lags.py for each lag")
+    print("next: $PY timeline.py (must pass), $PY music_pulses.py (none / none), $PY ranges.py, $PY audio.py (measures every lag and prints where each gunshot lands)")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ usage: python text_test.py              -> text_test.jpg for the frame the timel
        python text_test.py vertical     -> the 1080x1920 sample (also before the timeline says FRAME = "vertical")
        python text_test.py horizontal   -> the 1920x1080 sample
 one row per style, then one row with the widest word of the timeline (to check that it stays within 70 % of the width);
-label = cue start beat and frames since it started. Vertical: the background has the gameplay window (the lighter band
+label = cue start beat and frames since the first letter (on T.nearest_frame(start) - T.HIT_LEAD; +HIT_LEAD = the frame the whole word is
+legible on, checked and printed per row). Vertical: the background has the gameplay window (the lighter band
 across the middle, where the words sit).
 Printed per row, measured on the rendered letters of the third tile (the ink, not the glow): capital height in px and as a
 share of the frame height (vertical: also of the window height), ink width as a share of the frame width (vertical: of the
@@ -38,7 +39,7 @@ def canvas(flat=False):
 
 
 def fr(beat, off=0):
-    n = textfx.frame_of(beat) + off
+    n = textfx.frame_of(beat) - T.HIT_LEAD + off
     can = canvas()
     textfx.draw(can, n, T.frame_beat(n))
     d = (np.clip(can, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
@@ -68,6 +69,9 @@ def report(j, label):
     if frame.VERT:
         line += " = %4.1f %% of the window" % (100.0 * cap / frame.WIN_H)
     line += " | ink %4d px = %4.1f %% of W | centre dx %+.1f dy %+.1f" % (x1 - x0 + 1, 100.0 * (x1 - x0 + 1) / W, (x0 + x1 + 1) / 2.0 - W / 2.0, (y0 + y1 + 1) / 2.0 - H / 2.0)
+    first, last = min(cue.appear.values()), max(cue.appear.values())
+    ok = first == T.nearest_frame(cue.a) - T.HIT_LEAD and last <= T.nearest_frame(cue.a)
+    line += " | letters on frames %+d..%+d from the onset frame %s" % (first - T.nearest_frame(cue.a), last - T.nearest_frame(cue.a), "ok" if ok else "WRONG")
     print(line)
 
 

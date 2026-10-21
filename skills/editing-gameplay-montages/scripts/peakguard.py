@@ -3,15 +3,17 @@
 The limiter in run.sh / deliver.sh stops the mix at 0.82, but the AAC encoder can still overshoot on some
 transients (measured: a decoded peak of +0.035 dBFS on one test edit, -1.2 dBFS on another). This script
 decodes the mp4's audio, and when its peak is above TARGET it encodes the audio again from mix.wav with a
-lower limiter ceiling (the picture is copied, not re-encoded), up to 4 tries.
+lower limiter ceiling (the picture is copied, not re-encoded), up to 4 tries. The limiter is ff.limiter(), `alimiter ... latency=1`,
+the same as run.sh / deliver.sh: an encode again must not move the sound by the limiter's 143-sample look-ahead (2.979 ms).
 
 usage: python peakguard.py <video.mp4> <volume|chain> [mix.wav]      (run.sh and deliver.sh call it after the mux)
 The volume is the one the caller applies to mix.wav (house 2.36). "chain" (reference style): the filter chain of the
 project's audio.py, audio.master_chain(limit) = make-up gain 1.18 / HEADROOM, optional band limit, limiter, optional trim;
-run from the project folder, where audio.py and timeline.py are."""
+run from the project folder, where audio.py and timeline.py are.
+`python peakguard.py --filter <volume|chain> [limit]` prints the -af chain (run.sh / deliver.sh of the house style take it from here)."""
 import os, subprocess, sys
 import numpy as np
-from ff import FF
+from ff import FF, limiter
 
 TARGET = -0.5          # dBFS: the decoded sample peak must stay below this
 LIMIT = 0.82           # the limiter ceiling run.sh / deliver.sh start from
@@ -31,7 +33,7 @@ def filters(volume, limit):
     if volume == "chain":
         import audio                                        # the reference style: HEADROOM / MASTER_LOWPASS / MASTER_TRIM_DB of timeline.py
         return audio.master_chain(limit)
-    return f"volume={float(volume)},alimiter=limit={limit:.4f}:attack=3:release=60:level=disabled"
+    return f"volume={float(volume)}," + limiter(limit)
 
 
 def remux(path, volume, mix, limit):
@@ -48,6 +50,9 @@ def remux(path, volume, mix, limit):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--filter":
+        print(filters(sys.argv[2], float(sys.argv[3]) if len(sys.argv) > 3 else LIMIT))
+        sys.exit(0)
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     path, volume = sys.argv[1], sys.argv[2]

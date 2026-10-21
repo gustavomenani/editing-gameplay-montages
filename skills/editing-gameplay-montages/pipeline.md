@@ -11,13 +11,14 @@ absolute one, `PY="$PWD/venv311/Scripts/python.exe"`, and export it: `run.sh` an
 ```
 <project>/
   clips.json            short name -> original file            you write it
-  src/                  c1.mp4 / c1.mkv ... music.flac          ingest.py (links, or converted working copies)
+  src/                  c1.mp4 / c1.mkv ... music.flac          ingest.py (links, or converted working copies; a lossy song is decoded once to music.flac)
   src/ingest.json       per clip: original size, fps, method     ingest.py
   pts/c1.csv ...        presentation time of every frame        mkpts.py
   banners.json          banner frame of every kill              you, from find_kills.py
   kills.json            kill frame K (+ feed frame, confidence)  kills_auto.py (Valorant alternatives: kill_table.py, mykills.py; each rewrites it)
   timeline.py           THE EDIT                                you, from timeline_example.py
   ranges.json           footage the edit needs                  ranges.py
+  hits.json             the song's measured drum hits           music_hits.py (t = attack time, r = hit(t), band)
   store/<clip>/<key>.jpg  real frames + in-betweens             prep.py, densify.py, repair.py
   models/rife-v4.25/    interpolation network                   copied from the skill
   venv311/              Python 3.11                             uv
@@ -100,6 +101,7 @@ the run ends with the entries that failed and exit code 1. Long conversions prin
 - Sound: the clip's FIRST audio track as FLAC (OBS track 1 = the game or the mix; mic and Discord tracks are
   listed and ignored), aligned so that frame n and its sound belong together (measured: 0.0 ms on forced
   conversions, late audio, late video, 1440p144; 2 ms on 59.94 fps). A clip without sound gets a warning.
+- Song: flac, wav and aiff are linked as they are (`src/music.flac` / `.wav`). Any other file (m4a, aac, mp3, ogg, opus ... or a song inside a video container) is decoded ONCE to `src/music.flac`: a full decode from sample 0 in 24 bit (ffmpeg's s32 FLAC holds 24 bits; the container's priming applied, which is what every tool decodes), `MUSIC` in timeline.py points to it, and the line prints the sample count of the source's decode against the flac's. Why: ffmpeg's `-ss` before `-i` inside AAC / mp3 lands 8 to 40 ms off the sample, a flac seeks exactly, and every cue, hit and cut is a time of that one file. (Measured on a 9.6 M-sample m4a: same count, lag 0; about 750 samples where the AAC decode overshoots full scale are held at 1.0.)
 
 Measured on a GTX 1650 against a real 1080p60 recording: forced conversion of the same clip 41 to 45 dB per
 frame (x264 rounding only); 120 fps source, 0 interpolations; 144 fps and 2560x1440 built from 60 fps,
@@ -141,35 +143,38 @@ Two settings that depend on the PC:
 | `find_kills.py` | kill-banner sheets + candidate frames (Valorant HUD) | `$PY find_kills.py c3` or `c1 82 97` (seconds) |
 | `kill_table.py` | per kill: frame K for the beat, gunshot, lag, gallery | `$PY kill_table.py` (reads `banners.json`; an entry `[banner, K]` fixes K by hand) |
 | `cadence.py` | duplicated frames / real pauses in a source clip | `$PY cadence.py c1 5290 5725`, add `--detail` on a short range |
-| `music_tempo.py` | BPM with its half / double alternative and the evidence, fit strength (WEAK = no clear beat), provisional phase, loud sections, kick pattern, every drop | `$PY music_tempo.py` |
-| `music_grid.py` | exact first-beat time `BEAT0`, shifted-grid warning, corrected BPM when the given one drifts (use the BPM and BEAT0 it prints) | `$PY music_grid.py 130 0.423 27 72` |
-| `music_spec.py` | spectrogram labelled in timeline beats | `$PY music_spec.py [r0 r1]` |
-| `music_pulses.py` | kick / snare / hat strength on every half beat (the `beat_hits.py` measure, so it prints exactly what the drafters use) | `$PY music_pulses.py` |
-| `draft_timeline.py` | writes a correct first draft of a house-style `timeline.py` from `plan.json` (BPM, BEAT0, the drop's track beat, `cuts_on`, length, the kills in order with level / `continuous` / `lag`), explains every segment, refuses with numbers when the plan cannot fit (edit-design.md, "Drafting the timeline") | `$PY draft_timeline.py plan.json [-o timeline.py] [--force] [--compare timeline_example.py]` |
-| `beat_hits.py` | the shared measure (both drafters, `music_pulses.py`): kick = the onset of 30..140 Hz (a bass guitar that keeps the band loud does not count), snare / clap = body (160..1500 Hz) and crack (1.5..8 kHz) arriving together, hat = the bright energy; the strongest within +-50 ms of each half beat (a live drummer drifts about 30 ms) | imported |
-| `preview.py` | rough preview of the whole edit in about half a minute, BEFORE `prep.py` (no store needed): the nearest real source frame for every output frame (no interpolation, no effects, slow motion steps frame by frame), the style's framing, hard cuts (an overlapping house transition is a cross-fade), the words as plain text, the song, a "PREVIEW" label; `--marks` frames every kill. Cuts and kills land on the same frames as the real render (worked example: 62 of 62 kills within 1 frame) | `$PY preview.py [preview.mp4] [--scale 0.5] [--marks]` |
-| `refstyle/ref_analyze.py` | reference style: everything the reference video does, measured (layout, cuts in beats, transition kinds, speed, words, colour, ending), plus SUGGESTED SETTINGS (reference-style.md, "Reading the reference") | `$PY ref_analyze.py "$REF" --music src/music.flac` |
-| `refstyle/draft_ref_timeline.py` | reference style: first-draft `timeline.py` from `plan.json` (entries, music block, intro words, luma fade; reference-style.md, "Drafting the entry list") | `$PY draft_ref_timeline.py plan.json [-o draft.py] [--force] [--compare timeline_ref_example.py]` |
-| `refstyle/lyrics_sync.py` | lyric words in one command: demucs voice stem of the section (`lyrics_stem.py`), CTC alignment of the confirmed words in `lyrics.txt` by two models (`lyrics_ctc_align.py`, both in `venv_sep`), mean refined on the stem (`cues_from_alignment.py`) -> `lyric_cues.json`, and `lyrics/sync_N.jpg` (`lyric_sync_sheet.py`); about 50 s for a 31 s section, cached re-runs in seconds (reference-style.md, "Lyric words") | `$PY lyrics_sync.py [--stem-only] [--t0 S --t1 S] [--models mms] [--red=A:B] [--last-end BEAT]` |
+| `music_tempo.py` | BPM with its half / double alternative and the evidence, fit strength, the tempo again in every 30 s window (`tempo steady?`: windows more than 0.3 % apart = a live drummer or a tempo change, so one BPM / BEAT0 is true only near the part measured) and the beat phase of the strong attacks in 10 s windows (`beat phase steady?`: scatter above 10 ms = a drummer who swings around the tempo), provisional phase, loud sections, kick pattern, every drop. A WEAK fit (under 2.5x: strong off-beats of a band, a syncopated groove, no clear pattern) is printed as a `WEAK:` warning with the best fit and the tables, exit 0, as long as both steadiness checks pass; WEAK AND not steady (or under 30 s to judge) = `NO TEMPO`, no beat tables, exit 1 | `$PY music_tempo.py` |
+| `music_grid.py` | every drum attack of the stretch measured with the skill's one attack definition, then: the TEMPO CROSS-CHECK (scans +-1.5 % of the BPM given; a BPM that another tempo fits 1.3x better is REFUSED: it names the better one, prints no BEAT0, exit 1); `BEAT0` on the sixteenth lines the strong hits sit on (a move above 1/16 beat announced, shifted-grid alternatives printed); a tempo correction only from 60 s of track; the VERDICT over all strong hits (median, MAD, share beyond 8.3 ms, the worst hit): above 5 % it prints `constant grid NOT adequate: place on hits.json times` and the events go on the hits' own times | `$PY music_grid.py 130 0.423 27 72` |
+| `music_hits.py` | `hits.json`: every hit of the section with its attack time `t` (track seconds), `r = hit(t)` (timeline beat, 9 decimals), band (`low` kick / 808, `mid` snare / clap, `high` hat), strengths, per-band times `tl` / `tm` / `th`, and `dt_ms` to the grid line (orientation only); plus a table. For hand-written timelines, the gate and the drafters' explanations | `$PY music_hits.py [R0 R1]`; `--all`, `--sub 4`, `-o`; `--music --bpm --beat0 --m0 --r0 --r1` without a timeline |
+| `music_spec.py` | spectrogram labelled in timeline beats, with a triangle on every measured attack (red kick, green snare, blue hat) | `$PY music_spec.py [r0 r1]` |
+| `music_pulses.py` | kick / snare / hat strength on every half beat (`beat_hits.measure_t`, so it prints what the drafters use) and the PLACEMENT CHECK: every kill (`T.HITS`), every `"bass"` cut (against a kick of strength 0.4 or more), every bump and boom against the measured attacks, in ms and frames; more than 8.3 ms (half a frame) off = FAIL, exit 1. Needs SYNC 2 | `$PY music_pulses.py` |
+| `draft_timeline.py` | writes a correct first draft of a house-style `timeline.py` from `plan.json` (BPM, BEAT0, the drop's track beat, `cuts_on`, length, the kills in order with level / `continuous`; `cut_lead_frames` / `hit_lead_frames`; `lag` only for a kill `audio.py` cannot measure): every kill on a kick / snare ATTACK, a bass cut on the kick's attack, a kills-mode cut on the attack of its 1/4-beat line (the grid line when nothing sounds), R1 / FADE_OUT on beat lines, all written as musical beats with 9 decimals; explains every segment, refuses with numbers when the plan cannot fit or a K is unverified (edit-design.md, "Drafting the timeline") | `$PY draft_timeline.py plan.json [-o timeline.py] [--force] [--compare timeline_example.py]` |
+| `beat_hits.py` | the shared measure (both drafters, `music_pulses.py`, `music_hits.py`, `music_grid.py`, the gate): `measure_t` returns the strengths on the 1/2 or 1/4 beat lattice AND `att` = {lattice beat: (attack time, band)} for every row backed by a real attack within 50 ms of the lattice point (a hit 40 ms from the beat can no longer pass as one). Kick = the onset of 30..140 Hz (a bass guitar that keeps the band loud does not count), snare / clap = body (160..1500 Hz) and crack (1.5..8 kHz) arriving together, hat = the bright energy. ONE attack definition: the half height of the band's linear envelope across its steepest 6 ms rise, minus a per-band bias measured on synthetic truth (kick with a 2 / 3 / 5 ms ramp -0.3 / +0.6 / +1.5 ms mean, max 2.0 / 2.4 / 3.3; snare and hat within 0.5 ms; a click-less 808 reads about 4 ms late with a 3 ms scatter: the limit of that sound). `measure()` is kept for old callers | imported |
+| `preview.py` | rough preview of the whole edit in about half a minute, BEFORE `prep.py` (no store needed): the nearest real source frame for every output frame (no interpolation, no effects, slow motion steps frame by frame), the style's framing, hard cuts (an overlapping house transition is a cross-fade), the words as plain text, the song, a "PREVIEW" label; `--marks` frames every kill. Cuts and kill marks sit on the same frames as the real render (`take_of(n)`, the shown kill beat), words start `HIT_LEAD` frames early, and the audio is sliced by sample count (no `-ss` before `-i`: within 0.02 ms of the song for flac, mp3 and m4a) | `$PY preview.py [preview.mp4] [--scale 0.5] [--marks]` |
+| `refstyle/ref_analyze.py` | reference style: everything the reference video does, measured (layout, every cut on the lattice of its own grid with the offset in frames, the frames its cuts and kill flashes come before the drum attack, its kills from the kill feed, transition kinds, speed, words, colour, ending), plus SUGGESTED SETTINGS and the `adopt` block of `ref_notes.json` that the drafter follows (reference-style.md, "Reading the reference") | `$PY ref_analyze.py "$REF" --music src/music.flac` |
+| `refstyle/draft_ref_timeline.py` | reference style: first-draft `timeline.py` from `plan.json` (entries, music block, the `draft:cut` block with `CUT`, `CUT_LEAD`, `HIT_LEAD`, intro words, luma fade); every kill / bump / boom / riser end on a measured attack, kills-mode cuts on lattice lines with a SHOWN lead of 12 to 16 frames, the reference's `adopt` block followed (plan > reference > model), `reference followed / not followed` block, K and BPM-drift refusals; reference-style.md, "Drafting the entry list" | `$PY draft_ref_timeline.py plan.json [-o draft.py] [--force] [--compare timeline_ref_example.py]` |
+| `refstyle/lyrics_sync.py` | lyric words in one command: demucs voice stem of the section (`lyrics_stem.py`: sample-exact cut, at least 9 s separated because demucs delays shorter inputs by up to 3.2 ms), CTC alignment of the confirmed words in `lyrics.txt` by two models (`lyrics_ctc_align.py`, in `venv_sep`: the frame stride is exactly 320 samples = 20.000 ms, each model runs 8 times with the stem moved by 2.5 ms steps and the median is kept), each word moved onto its sung ATTACK (`cues_from_alignment.py`, `lyrics_attack.py`; CTC is only a prior) -> `lyric_cues.json` + `lyrics/cue_audit.json` (the flags), `lyrics/sync_N.jpg` and zoom panels (`lyric_sync_sheet.py --zoom flagged\|all\|WORD,WORD`), and the numeric audit `lyrics_audit.py` (exit 1 beyond 25 ms of a confident attack with no flag); it refuses a MUSIC that is not lossless and a timeline without SYNC 2; about 50 s for a 31 s section, cached re-runs in seconds (reference-style.md, "Lyric words") | `$PY lyrics_sync.py [--stem-only] [--t0 S --t1 S] [--models mms] [--red=A:B] [--last-end BEAT] [--adv 0]` |
 | `timeline.py` | the edit; run it to print and self-check (it runs `preflight.py` first) | `$PY timeline.py` |
-| `preflight.py` | checks timeline.py and lists EVERY problem at once: clips missing from `src/`, anchors that do not increase, kills outside their segment or clip, a misspelled `CUTS_ON`, a song shorter than the edit, malformed `BUMPS`, `BOOMS`, `LUMA_IN`, `ACC`, `IMPACT`, sound levels or segment `white` / `shot_from`. `ranges.py`, `check_store.py`, `densify.py`, `render.py`, `audio.py`, `check.py`, `kill_lags.py` and `run.sh` run it themselves | `$PY preflight.py` |
+| `preflight.py` | checks timeline.py and lists EVERY problem at once: `SYNC = 2` (an older timeline is refused with the update message), the grid identities (FPS, PER, FPB, MUSIC_T0, N_FRAMES), every cut and shot on a whole frame, `HITS` present with one musical hit per kill shown on `vis(hit, HIT_LEAD)` and inside its take, clips missing from `src/`, anchors that do not increase, kills outside their segment or clip, a misspelled `CUTS_ON`, a song shorter than the edit, malformed `BUMPS`, `BOOMS`, `LUMA_IN`, `ACC`, `IMPACT`, sound levels or segment `white` / `shot_from`. `ranges.py`, `check_store.py`, `densify.py`, `render.py`, `audio.py`, `check.py`, `kill_lags.py` and `run.sh` run it themselves | `$PY preflight.py` |
 | `deathstrip.py` | when each enemy visibly dies: per kill 1:1 crops around the crosshair at K-8, K, K+4 ... K+52 and the kill feed at K+4 ... K+20; tiles the timeline shows are green, the rest red; prints per kill how many frames after the shot the edit shows and a WARNING when that is less than the entry's `upto`. `upto` for plan.json = frames from K until the body is down | `$PY deathstrip.py ds.jpg` (every kill of timeline.py, two per sheet), `$PY deathstrip.py ds.jpg c01@862 c04@303` (candidates), `--fine` (K to K+30 every second frame, wider crop) |
-| `ranges.py` | footage needed by the timeline -> `ranges.json` | `$PY ranges.py` |
+| `ranges.py` | footage needed by the timeline -> `ranges.json` (both layers of a house-style overlapping transition, from `T.active`) | `$PY ranges.py` |
 | `prep.py` | builds the sub-frame store with RIFE (resumable) | `$PY prep.py ranges.json` |
 | `densify.py` | more in-betweens where the picture moves fast | `$PY densify.py run 12 28`; `plan 12 28` only prints. Both take the two thresholds (output pixels of travel per frame that trigger 8x and 16x) |
 | `repair.py` | rebuilds a duplicated source frame in the store | `$PY repair.py c3:125` |
 | `fixends.py` | rebuilds the sub-frames next to every real frame in a store built without `rifeutil.Tween` (RIFE dead zone, see pitfalls.md); a store built by the bundled `prep.py` does not need it | `$PY fixends.py` |
 | `posmap.py` | measures where every stored sixteenth really sits (`posmap.json`, read by the refstyle `render.py`) | `$PY posmap.py` after any change of the store |
-| `check_store.py` | store covers the timeline; no duplicates left; no damaged (cut-off) JPEG. Exit code 1 when footage is missing or a file is damaged | `$PY check_store.py`; `--delete` removes damaged files (then `prep.py ranges.json` rebuilds them) |
+| `check_store.py` | store covers the timeline (both layers of a house transition: `T.active`); no duplicates left; no damaged (cut-off) JPEG. Exit code 1 when footage is missing or a file is damaged | `$PY check_store.py`; `--delete` removes damaged files (then `prep.py ranges.json` rebuilds them) |
 | `render.py` | frames -> video part, or stills | `$PY render.py 0 742 part.mp4`, `$PY render.py 116 117 k.jpg`, `$PY render.py 100 140 s.jpg 4` |
-| `kill_lags.py` | gunshot onset relative to K for every kill | `$PY kill_lags.py` |
-| `audio.py` | `mix.wav` + stems, and where each shot lands | `$PY audio.py` |
+| `kill_lags.py` | gunshot onset relative to K for every kill, to the sample (`measure()`: house `audio.py` calls it per kill; clips are decoded on the file's clock) | `$PY kill_lags.py` |
+| `audio.py` | `mix.wav` + stems, and where each shot lands; `audio_report.json` per kill (the musical beat, the shown beat, the placement state, the onset in ms) | `$PY audio.py` |
 | `mix_spec.py` | spectrogram of mix and stems in beats | `$PY mix_spec.py -5.2 5 59 72` |
-| `run.sh` | 3 parallel parts + sound + mux -> master. Refuses to start when the venv, the timeline or the store is not ready; when one part fails it stops the others and shows the end of its log; ends with `peakguard.py`; the last line gives the render speed | `bash run.sh master.mp4` (the mux applies `volume=2.36` in the house `run.sh`; `scripts/refstyle/run.sh` takes its chain from `audio.master_chain()`, `volume = 1.18 / HEADROOM`: see "How the sound is made (audio.py)") |
-| `check.py` | smoothness, kill strips, overview, loudness | `$PY check.py master.mp4 --sheets` |
-| `deliver.sh` | runs `gate.py` (refuses on any ERROR), then the upload copy from the master, then `peakguard.py` | `bash deliver.sh master.mp4 out.mp4`; `ACCEPT=<code> bash deliver.sh ...` waives one accepted problem (house: crf 18, max 17 Mbps; `scripts/refstyle/deliver.sh`: crf 17, max 22 Mbps, and the same `audio.master_chain()` as its `run.sh`) |
-| `gate.py` | the delivery gate: timeline, file against timeline, the master's `timeline_sha1` stamp, picture (frozen, stalls, kill sync), sound (peak, loudness), `audio_report.json`, `kill_rank.py`, lyrics; ERROR refuses, WARN passes; a waived code goes to LEIAME.md (verification.md, "The delivery gate") | called by `deliver.sh`; by hand `$PY gate.py master.mp4 [--json] [--no-pixels] [--accept CODE]` (15 s to 2 min) |
-| `peakguard.py` | decodes the finished file's audio; if its peak is above -0.5 dBFS (the AAC encoder overshoots the limiter on some songs) it encodes the audio again from `mix.wav` with a lower limiter ceiling, picture copied | called by `run.sh` and `deliver.sh`; by hand `$PY peakguard.py out.mp4 2.36` (house) or `$PY peakguard.py out.mp4 chain mix.wav` (reference style: `audio.master_chain()`) |
+| `run.sh` | 3 parallel parts + sound + mux -> master. Refuses to start when the venv, the timeline or the store is not ready; when one part fails it stops the others and shows the end of its log; gives each part its exact `duration` in the concat list and then runs `ff.py pts video.mp4 N A B` (every video pts step must be exactly 1/60 s and the count N, else it names the join); ends with `peakguard.py`; the last line gives the render speed | `bash run.sh master.mp4` (the mux applies `volume=2.36` in the house `run.sh`; `scripts/refstyle/run.sh` takes its chain from `audio.master_chain()`, `volume = 1.18 / HEADROOM`: see "How the sound is made (audio.py)") |
+| `check.py` | smoothness, kill strips, overview, loudness, and per kill the MEASURED flash frame (ok / EARLY / LATE / spread / not measurable against the shot frame); refuses a timeline without SYNC 2 | `$PY check.py master.mp4 --sheets` |
+| `deliver.sh` | runs `gate.py` (refuses on any ERROR), then the upload copy from the master, then `peakguard.py`, then `gate.py --sync-only` on the upload copy (an ERROR renames it `*.rejected.mp4` and fails) | `bash deliver.sh master.mp4 out.mp4`; `ACCEPT=<code> bash deliver.sh ...` waives one accepted problem, never one of the sync codes (house: crf 18, max 17 Mbps; `scripts/refstyle/deliver.sh`: crf 17, max 22 Mbps, and the same `audio.master_chain()` as its `run.sh`) |
+| `gate.py` | the delivery gate: SYNC 2 timeline, file against timeline, the master's `timeline_sha1` stamp, picture (frozen, stalls, kill sync), sound (peak, loudness), `audio_report.json`, `kill_rank.py`, `kverify.py` (with the game's profile), lyrics, and the independent sync audit (`syncaudit.py`); ERROR refuses, WARN passes; every item that could not be measured is a WARN, never a pass; a waived code goes to LEIAME.md (verification.md, "The delivery gate") | called by `deliver.sh`; by hand `$PY gate.py master.mp4 [--json] [--no-pixels] [--table] [--deep] [--accept CODE]` (15 s to 2 min); `$PY gate.py --sync-only FILE` audits one file (the upload copy) without the master; `--codes` lists every code |
+| `syncaudit.py` | the audit of the FINISHED file, read from the output only: pts lattice, the decoded audio against the real song (lag in samples and drift), gunshot onsets against the musical hits, accent frames, the muzzle flash found by matching the source's flash image, cut frames, words, the song's grid phase; prints the table (expected frame / measured frame / ms) and the findings (verification.md, "Sync audit") | `$PY syncaudit.py master.mp4 [--deep]`; usually through `gate.py` |
+| `kverify.py` | re-measures K of every kill on the pictures (ammo-counter step in any digit colour, muzzle-flash start, replay cut): verified / CORRECT / SUSPECT / not measurable, sheets `kv_NN.jpg`, `kv.json`; `--update` writes the verdict into `kills.json` (`how`, `conf`, `verified`, `K_was`); `--game NAME` picks the profile in `games/` (default `valorant`); exit 1 on a suspect or corrected kill, and on a timeline without SYNC 2 | `$PY kverify.py [timeline.py\|plan.json\|kills.json [--ids 3,4]\|clip@K] [--game NAME]` |
+| `peakguard.py` | decodes the finished file's audio; if its peak is above -0.5 dBFS (the AAC encoder overshoots the limiter on some songs) it encodes the audio again from `mix.wav` with a lower limiter ceiling, picture copied; the limiter is `alimiter ... latency=1` like `run.sh` and `deliver.sh` (without it the look-ahead delays the whole sound by 143 samples = 2.979 ms) | called by `run.sh` and `deliver.sh`; by hand `$PY peakguard.py out.mp4 2.36` (house) or `$PY peakguard.py out.mp4 chain mix.wav` (reference style: `audio.master_chain()`); `--filter VOLUME [LIMIT]` prints the chain |
 | `look.py` | the edit options (`LOOK` in timeline.py): defaults, presets suave / padrao / intensa / maxima / modelo (the model edit's look, the drafter's default), colour grades; both renderers read it, `preflight.py` checks it | `$PY look.py` prints every option with its range |
 | `rife_compare.py` | objective comparison of RIFE models | `$PY rife_compare.py rife-v4.25 rife-v4.26`: only `rife-v4.25` ships; download any other version from github.com/TNTwise/rife-ncnn-vulkan (folder `models/`) into `models/<name>/` (it must hold `flownet.bin`; the name must keep the version) |
 
@@ -192,6 +197,7 @@ command again and it builds only what is missing.
 | `peek.py` | 1.3 s per tile when stepping | a one-per-second overview of a 17 s clip takes 25 s |
 | `audio.py`, `deliver.sh` | 5 s, 1 min | |
 | `check.py` | 1 min | decodes the whole video |
+| `syncaudit.py`, `gate.py --sync-only` | about 1 min for a 45 s edit; `--deep` 1 to 2 min more | decodes the file and the clips' flash frames; `deliver.sh` runs it on the upload copy |
 | reference style, 1920x1080 | prep 6.9 sub-frames/s, 0.55 MB each; 46 s = 23,500 files, 13 GB, about 55 min; render 15 min | with a game running on the PC: interpolation 8x slower, render 35 min at BelowNormal priority |
 
 Start `prep.py` in the background as soon as the anchors are roughly right and keep working (sound,
@@ -205,6 +211,7 @@ and time to expect for the store (it knows the wider reference-style frames).
 |---|---|
 | anchors, kills, segments | `timeline.py`, `ranges.py`, `prep.py`, `densify.py`, `check_store.py`, stills, `run.sh` |
 | `lag`, `voice`, `SWEEP`, `RISERS`, mix levels | `audio.py`, then only the mux command of `run.sh` and `$PY peakguard.py master.mp4 2.36` (reference style: `$PY peakguard.py master.mp4 chain mix.wav`) |
+| `BPM`, `BEAT0`, `M0` (the song's grid) | `music_hits.py`, draft again (every event is a measured time converted with the grid: a new grid moves them all), then everything under "anchors, kills, segments" |
 | effect values in `render.py`, `LOOK`, `FRAME` (reference style), transitions, `PULSES`, `bars`, `push` | stills, `run.sh` (the store does not change) |
 | one third of the video | `$PY render.py A B part_1.mp4`, then the concat and mux commands of `run.sh` (parts split at N/3 and 2N/3) |
 | upload bit rate | `deliver.sh` |
@@ -259,11 +266,19 @@ window or backdrop and a different set of effects (reference-style.md, "The styl
   runs slower than 0.7x, and 8x or 16x where the picture travels more than 12 or 28 output pixels per frame.
 - **Time**: `timeline.TimeMap` is a monotone cubic through the anchors (beat -> source frame), so every
   speed change is eased. `lead()` and `tail()` build the usual shapes.
+- **Timing (SYNC 2)**: the beat axis is linear: output frame n shows beat `frame_beat(n) = R0 + n / FPB`. A cut or shot is built
+  on `vis(beat, lead)`, an exact output frame, and the take on screen at frame n is `take_of(n)` (a frame index, no float
+  compare). Every accent of a shot (zoom punch, shake, exposure pop, fringe, impact frames, backdrop pulse) is a function of
+  the whole frames since the shot frame: it starts there at its peak (instant attack, then the same ring-down as before; the
+  house style's pre-kill zoom build-up peaks there too). Reference style: the frames just before and on the shot frame are
+  read at their exact source position with no shutter blend, so the muzzle flash is whole on the shot frame and absent on
+  the one before.
 - **Shutter integration**: an output frame is the average of the stored sub-frames over its shutter
   interval (`SHUTTER = 0.65` of the frame time, box filter over the piecewise-linear interpolation).
   This gives exact time sampling at any speed and physically right motion blur. It is the reason the
   video does not judder.
-- **Camera**: `cam()` returns zoom, offset and roll per beat (kill zooms, shake, pushes, cuts with zoom).
+- **Camera**: `cam()` returns zoom, offset and roll (kill zooms, shake, pushes, cuts with zoom; in the reference style
+  `cam(n)` and `look(n)` take the output frame number, in the house style a beat).
   Camera and transition moves are supersampled the same way: up to 40 sub-samples, at most 4 px of
   travel each (`CAM_SHUTTER = 0.85`), so a whip or spin smears instead of stepping.
 - **Compositing** in linear light (gamma 2.2): blurred backdrop, window with rounded mask, stroke, halo
@@ -286,21 +301,25 @@ done. Any new script that calls `rifeutil.load()` must end the same way.
 
 ## How the sound is made (audio.py)
 
-House style. The reference style's `scripts/refstyle/audio.py` places one gunshot per kill at natural pitch and
-no whooshes, and writes the mix at 0.8 (reference-style.md, "Sound").
+House style. The reference style's `scripts/refstyle/audio.py` places one gunshot per kill at natural pitch (a swish on
+blur-in cuts only with `WHOOSH_BLUR`, centred on the cut's musical beat `s["m0"]`) and writes the mix at 0.8 (reference-style.md, "Sound").
 
-- **Music**: cut at `T.MUSIC_T0`, optional low-pass sweep (`T.SWEEP`), fade out over `T.FADE_OUT`.
-- **Game sound**: follows the same time maps as the picture, shifted by `lag` frames so the gunshot lands
-  on the beat. It fades out between 0.7x and 0.25x and between 1.3x and 1.8x (no pitched-down or
-  chipmunk sound); kills of level 2 and 3 stay audible. `voice=` and `stretch=True` use a pitch-preserving
-  stretch (WSOLA) instead of resampling. High-pass at 70 Hz so it does not fight the bass.
+- **Music**: cut at `T.MUSIC_T0`, optional low-pass sweep (`T.SWEEP`), fade out over `T.FADE_OUT`. The mix is exactly
+  `N_FRAMES / FPS` long (the picture's length).
+- **Game sound**: follows the same time maps as the picture. The gunshot's `lag` is MEASURED per kill
+  (`kill_lags.measure`, to the sample) and corrected for the offset between the flash frame and the musical hit,
+  so the shot sounds on the hit itself; a typed `S(lag=...)` is accepted only when the clip is silent around the
+  kill or it agrees with the measurement within 0.25 frame. It fades out between 0.7x and 0.25x and between 1.3x
+  and 1.8x (no pitched-down or chipmunk sound); kills of level 2 and 3 stay audible. `voice=` and `stretch=True`
+  use a pitch-preserving stretch (WSOLA) instead of resampling. A causal 70 Hz high-pass (no pre-ring) so it
+  does not fight the bass.
 - **Effects**: risers from `T.RISERS`, a whoosh on every whip, spin and zoom transition (panned with
-  the whip direction).
+  the whip direction, centred on the cut's musical beat `s["m0"]`).
 - **Mix**: `0.84 * music + 0.60 * game + effects`, all three faded out over `T.FADE_OUT`. The mix peaks
   above full scale (1.29 in the house example: a loud master plus shots), so `mix.wav` and the stems are written at
   half level; `run.sh` gives the level back (house: `volume=2.36` = 1.18 x 2; the reference style writes at
   `HEADROOM`, 0.8 unless timeline.py sets it, 0.5 in a drafted model-style edit, and its `run.sh`, `deliver.sh` and
-  `peakguard.py ... chain` all use `audio.master_chain()` = `volume = 1.18 / HEADROOM`), limits at 0.82, and encodes
+  `peakguard.py ... chain` all use `audio.master_chain()` = `volume = 1.18 / HEADROOM`), limits at 0.82 (`alimiter ... latency=1`: without `latency=1` the limiter's look-ahead would delay the whole sound by 143 samples = 2.979 ms), and encodes
   AAC 320k with PNS, TNS and intensity stereo off. Result: -8.5 LUFS, decoded peak -0.7 dBFS (house example). The
   AAC encoder can still overshoot the limiter on some songs (measured +0.035 dBFS on one test edit): `peakguard.py`,
   at the end of `run.sh` and `deliver.sh`, decodes the result and encodes the audio again with a lower ceiling
