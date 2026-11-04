@@ -68,6 +68,10 @@ def music():
         sys.exit("audio.py: the song does not cover the video:\n  - " + "\n  - ".join(err))
     a = int(round(T.MUSIC_T0 * SR))
     y = m[a:a + NS].copy()
+    if len(y) < NS:                             # the preflight formula can be a few hundred samples optimistic; a ValueError from the fade below is not a message
+        sys.exit("audio.py: %s is too short for this edit: the mix needs the song from %.3f s to %.3f s (MUSIC_T0 = %.3f s, %.3f s of it) and only "
+                 "%.3f s are there: %.1f ms are missing at the end. Lower MUSIC_T0 / R1, or choose a M0 earlier in the track. Nothing was written."
+                 % (T.MUSIC, T.MUSIC_T0, T.MUSIC_T0 + NS / SR, T.MUSIC_T0, NS / SR, (len(m) - a) / SR, (NS - len(y)) / SR * 1000.0))
     if T.SWEEP:
         # close a low-pass over the music along T.SWEEP = [(beat, cutoff Hz), ...] and snap it open 4 ms before
         # the last point (in the house example: through the bullet time, opening on the last kill)
@@ -89,7 +93,9 @@ def music():
         xf = int(0.003 * SR)
         out[-xf:] = out[-xf:] * np.linspace(1, 0, xf)[:, None] + y[b1 - xf:b1] * np.linspace(0, 1, xf)[:, None]
         y[b0:b1] = out
-    fi = int(0.05 * SR)
+    # A de-click, not a fade: the song must land sample-exact on its hits, and a 50 ms fade-in muted a hit on output sample 0 and cost
+    # -15.6 dB at 8.3 ms (half a frame, the placement bar). T.FADE_IN (seconds) still asks for a real fade, e.g. under the picture's.
+    fi = int((getattr(T, "FADE_IN", None) or 0.005) * SR)
     y[:fi] *= np.linspace(0, 1, fi)[:, None]
     y *= (1 - smooth((rr - T.FADE_OUT[0]) / (T.FADE_OUT[1] - T.FADE_OUT[0] - 0.05)))[:, None].astype(np.float32)
     return y
@@ -328,29 +334,37 @@ if __name__ == "__main__":
     # The files are written at HEADROOM (half level): the mix peaks above full scale (a loud master resampled,
     # plus shots), and a 16-bit file would flatten those peaks before the limiter in run.sh ever sees them.
     # run.sh / deliver.sh give the level back (volume = 1.18 / HEADROOM) in front of the limiter.
-    for name, x in (("stem_music", m), ("stem_game", g), ("stem_sfx", fx), ("mix", mix)):
-        with wave.open(f"{name}.wav", "wb") as w:
-            w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
-            w.writeframes((np.clip(x * HEADROOM, -1, 1) * 32767).astype(np.int16).tobytes())
+    # The peak is checked BEFORE anything is written: a failed run must not leave a clipped mix.wav behind that a later
+    # deliver.sh / mux would pick up as if it were good.
     print("mix peak %.3f  rms %.3f | music peak %.3f | game peak %.3f rms %.3f | sfx peak %.3f  (1.0 = full scale; written at x%.1f, "
           "so peaks up to %.1f are safe)" % (np.abs(mix).max(), np.sqrt((mix ** 2).mean()), np.abs(m).max(), np.abs(g).max(),
                                              np.sqrt((g ** 2).mean()), np.abs(fx).max(), HEADROOM, 1 / HEADROOM))
     if np.abs(mix).max() * HEADROOM > 1.0:
         sys.exit("audio.py: the mix peaks at %.2f, above the %.1f this file's headroom allows (the song is very loud or the game sound is hot): "
-                 "lower the gains in the line  mix = 0.84 * m + 0.60 * g + fx  (music 0.84, game 0.60), e.g. to 0.7 and 0.5, and run audio.py again"
-                 % (np.abs(mix).max(), 1 / HEADROOM))
+                 "lower the gains in the line  mix = 0.84 * m + 0.60 * g + fx  (music 0.84, game 0.60), e.g. to 0.7 and 0.5, and run audio.py again. "
+                 "Nothing was written." % (np.abs(mix).max(), 1 / HEADROOM))
+    for name, x in (("stem_music", m), ("stem_game", g), ("stem_sfx", fx), ("mix", mix)):
+        with wave.open(f"{name}.wav", "wb") as w:
+            w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
+            w.writeframes((np.clip(x * HEADROOM, -1, 1) * 32767).astype(np.int16).tobytes())
     # where does each kill's gunshot land relative to its hit? The refined attack of the finished game stem (kill_lags.attack: half height of
     # the steepest rise) within 12 ms of the hit, the same definition as the drum hits it has to meet.
-    hp = np.diff(g.mean(1), prepend=0)
+    # onset_near() reads 12 ms either side of the hit plus 6 / 4 coarse bins (kill_lags.BIN). A hit closer than that to an end of the mix can
+    # still be checked: the sound simply begins / ends there, the rest is silence. So pad the stem instead of calling a kill in the first
+    # 24 ms or the last 20 ms "silent" although its shot IS in the mix (gate.py turns a silent into no-gunshot).
+    PAD = int(0.012 * SR) + 6 * kill_lags.BIN
+    hp = np.concatenate([np.zeros(PAD, np.float32), np.diff(g.mean(1), prepend=0).astype(np.float32), np.zeros(PAD, np.float32)])
     states, late = [], []                                 # gate.py reads these from audio_report.json: heard / muted / silent, per kill
     for q in rep:
         k, c = q["hit"], q["clip"]
         cidx = int(round((k - T.R0) * T.PER * SR))
-        if q["mute"] or q["source"] is None or cidx < int(0.02 * SR) or cidx > NS - int(0.03 * SR):
-            print("  kill beat %5.1f (%s): no game sound to place (%s)" % (k, c, "muted take" if q["mute"] else "silent clip or the kill is at the very start / end of the video"))
+        if q["mute"] or q["source"] is None:
+            print("  kill beat %5.1f (%s): no game sound to place (%s)" % (k, c, "muted take" if q["mute"] else "silent clip or no typed lag"))
             states.append(dict(beat=k, shown=q["shown"], clip=c, state="muted" if q["mute"] else "silent"))
             continue
-        at = kill_lags.onset_near(hp, cidx, int(0.012 * SR))
+        at = kill_lags.onset_near(hp, cidx + PAD, int(0.012 * SR))
+        if at is not None:
+            at -= PAD
         if at is None:
             print("  kill beat %5.1f (%s): no gunshot attack within 12 ms of the hit in the game sound" % (k, c))
             states.append(dict(beat=k, shown=q["shown"], clip=c, state="silent", lag=q["lag"], lag_source=q["source"]))

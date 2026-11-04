@@ -35,7 +35,11 @@ def rd(clip, key):
     if not rifeutil.is_jpeg_complete(p(clip, key)):
         rifeutil.die(f"fixends.py: {p(clip, key)} is truncated or damaged: delete it, run  python prep.py ranges.json  again, then fixends.py "
                      "(python check_store.py lists the damaged files, --delete removes them)")
-    return cv2.cvtColor(cv2.imread(p(clip, key)), cv2.COLOR_BGR2RGB)
+    im = cv2.imread(p(clip, key))
+    if im is None:                                       # a whole FFD9 tail does not prove the picture decodes: imread returns None
+        rifeutil.die(f"fixends.py: {p(clip, key)} does not decode (a damaged JPEG that still ends in FFD9): python check_store.py --delete removes it, "
+                     "python prep.py ranges.json rebuilds it, then run fixends.py again")
+    return cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
 
 
 def wr(clip, key, rgb):

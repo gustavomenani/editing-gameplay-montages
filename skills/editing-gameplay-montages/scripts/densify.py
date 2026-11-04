@@ -1,11 +1,12 @@
 """Add more in-between frames where the picture moves fast, so motion blur is a smooth smear
-instead of a few stepped copies. Only source intervals that the edit shows at (near) real time or
-faster are considered; the faster the picture moves between two real frames, the denser the grid
-(8 or 16 sub-frames instead of 4). Existing files are kept.
+instead of a few stepped copies. Only source intervals that the edit shows at (near) real time are
+considered (0.75x up to 2.2x: faster footage is already a blur in the picture); the faster the
+picture moves between two real frames, the denser the grid (8 or 16 sub-frames instead of 4).
+Existing files are kept.
 
 usage: python densify.py plan 12 28     (only prints the plan)
        python densify.py run 12 28      (12 / 28 = output pixels of travel per frame that trigger 8x / 16x)"""
-import os, sys, glob, json
+import os, sys, glob, json, re
 import preflight
 import numpy as np
 import cv2
@@ -28,19 +29,23 @@ def path(clip, key):
 
 
 # 1) which source intervals does the edit show, and how fast
+SH = float(re.search(r"^SHUTTER = ([0-9.]+)", open("render.py", encoding="utf-8").read(), re.M).group(1))     # the render's shutter, read the way check_store.py does
 used = {}
-h = 0.5 / T.FPB / 2
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
     a, b, p, tin = T.active(r)
     for i in ([a] if b is None else [a, b]):
         s = T.SEGS[i]
-        p0, p1 = float(s["map"](r - h)[0]), float(s["map"](r + h)[0])
+        hh = s.get("shutter", SH) / T.FPB / 2          # the window the renderer really integrates over (a take may set its own shutter)
+        p0, p1 = float(s["map"](r - hh)[0]), float(s["map"](r + hh)[0])
         v = float(s["map"](r)[1])
         for j in range(int(np.floor(p0)), int(np.floor(p1)) + 1):
             k = (s["clip"], j)
             used[k] = max(used.get(k, 0.0), v)
-cand = sorted(k for k, v in used.items() if v >= 0.75)
+# the house example's blur-ins squeeze up to 4.6 source frames into one output frame under a heavy transition blur: the interval is
+# already a smear of a dozen sub-frames there, so densifying it costs hours of GPU and GB of store with no visible gain (the reference
+# style caps at 2.2x for the same reason)
+cand = sorted(k for k, v in used.items() if 0.75 <= v <= 2.2)
 
 # 2) how much the picture changes across each of those intervals
 gray = {}
@@ -66,7 +71,7 @@ for clip, j in cand:
         # how far the fast parts of the picture travel between the two frames, in output pixels
         mot[(clip, j)] = float(np.percentile(mag, 90)) * 4 * (1080 / 1280)
 if not mot:
-    sys.exit("densify.py: the store has none of the footage the edit shows at 0.75x or faster (store/ is empty or does not match timeline.py): "
+    sys.exit("densify.py: the store has none of the footage the edit shows at 0.75x to 2.2x (store/ is empty or does not match timeline.py): "
              "run  python ranges.py && python prep.py ranges.json  first, then  python check_store.py")
 vals = np.array(list(mot.values()))
 plan = {k: (16 if m >= T16 else 8 if m >= T8 else 4) for k, m in mot.items()}

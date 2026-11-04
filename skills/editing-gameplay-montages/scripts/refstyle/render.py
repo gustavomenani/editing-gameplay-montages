@@ -69,6 +69,9 @@ IMPACT = None if getattr(T, "IMPACT", None) is None else dict(
     dict(frames=6, blur=(0.035, 0.06, 0.09), split=(5, 9, 14), rays=(False, True, True), invert=(False, False, True)), **T.IMPACT)
 BUMPS = getattr(T, "BUMPS", [])
 LUMA_IN = getattr(T, "LUMA_IN", None)
+LUMA_FADE = getattr(T, "LUMA_FADE", None)           # the ending fade; a timeline that does not set it fades with the music (preview.py's default)
+if LUMA_FADE is None:
+    LUMA_FADE = T.FADE_OUT
 BARS = bool(LK["bars"]) and not frame.VERT                                  # cinema bars 2.39:1: horizontal frame only
 BAR_H = int(round((frame.H - frame.W / 2.39) / 2))                          # 138 px at the top and the bottom of 1920x1080
 BLUR_IN = 5                          # frames a blur-in lasts
@@ -136,6 +139,9 @@ class Store:
             sys.exit(f"render.py: {f} is cut off ({len(data)} bytes; a script stopped while writing it, or a full disk). "
                      "python check_store.py --delete removes the damaged files, python prep.py ranges.json rebuilds them.")
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:                                     # a whole FFD9 tail does not prove the picture decodes (a corrupt block, a bad copy):
+            sys.exit(f"render.py: {f} does not decode (a damaged JPEG that still ends in FFD9: a copy that was interrupted, a bad disk block). "
+                     "python check_store.py --delete removes the damaged files, python prep.py ranges.json rebuilds them.")
         lin = LIN[img[:, :, ::-1]]                           # RGB, linear light, float32
         self.cache[k] = lin
         if len(self.cache) > self.max:
@@ -526,7 +532,7 @@ def compose_vertical(S, s, z, ox, oy, th, ca, expo, i, n):
 
 def render_frame(n, store):
     r = T.frame_beat(n)
-    if r >= T.LUMA_FADE[1]:                                            # after the ending fade: black, no footage needed
+    if r >= LUMA_FADE[1]:                                              # after the ending fade: black, no footage needed
         return np.zeros((H, W, 3), np.uint8)
     i = T.take_of(n)
     s = SEGS[i]
@@ -604,7 +610,7 @@ def render_frame(n, store):
         y = 0.299 * disp[:, :, 0] + 0.587 * disp[:, :, 1] + 0.114 * disp[:, :, 2]
         disp = np.repeat((255.0 - y)[:, :, None], 3, axis=2).astype(np.float32)
     # ending: luma fade (dark areas go black first, the bright HUD last), as in the reference
-    lf = (r - T.LUMA_FADE[0]) / (T.LUMA_FADE[1] - T.LUMA_FADE[0])
+    lf = (r - LUMA_FADE[0]) / (LUMA_FADE[1] - LUMA_FADE[0])
     if lf > 0:
         if lf >= 1:
             return np.zeros((H, W, 3), np.uint8)

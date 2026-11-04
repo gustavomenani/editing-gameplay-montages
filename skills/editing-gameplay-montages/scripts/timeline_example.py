@@ -28,9 +28,8 @@ FPS = 60
 FPB = FPS * PER                     # output frames per beat (27.69)
 R0, R1 = -5.2, 75.2                 # first / last beat of the video
 FADE_OUT = (72.4, 75.2)             # picture and music fade to black over these beats
-CUTS_ON = "bass"                    # where transitions land: "bass" (kicks / 808s only, the default) or "kills" (with the
-                                    # kill rhythm): the user's choice in the briefing; music_pulses.py checks it. The edit
-                                    # below was cut with the kills ("kills"): its transition beats do not pass "bass".
+MAX_SPEED = None                    # no ceiling (the blur-ins fast-forward); 1.0 = nothing plays faster than real time. State it, do not omit it
+CUTS_ON = "kills"                   # the example's measured rhythm is the kill rhythm: its transition beats do not pass "bass"; music_pulses.py checks it
 # <<< draft:music
 
 
@@ -104,7 +103,8 @@ def S(clip, a, kills=(), slow=None, skill=(), tin=("cut", 0.0), lag=None, push=(
             (default) = audio.py measures it per kill with kill_lags.py's detector and refuses a kill it cannot measure; a number
             (or one per kill) = a value you read from kill_lags.py's strip for a shot the detector cannot measure; audio.py
             checks it against its own measurement and stops when they disagree by more than 0.25 frame
-    push    [(beat, beat, amount)] slow push-in of the camera (slow motion)
+    push    [(beat, beat, amount)] slow push-in of the camera (slow motion): it rises over the window and eases back out
+            over 0.6 beat after its last window, so it never leaves a standing crop (windows that touch are one push)
     bars    (beat, beat) the window narrows to a wider frame and the backdrop dims (slow motion)
     voice   0..1: the clip's sound is people talking: keep their pitch and let it run on in real time
     stretch True: keep the pitch of the game sound where the speed is not 1 (voice lines)
@@ -190,36 +190,6 @@ PULSES = [(-4.3, 0.7), (1, 0.6), (5, 0.8), (13, 0.6), (14, 0.7), (19, 0.5), (20,
           (33, 0.6), (37, 0.6), (41, 0.6), (45, 0.8), (47, 0.9), (49, 0.7), (53, 0.6), (53.5, 0.7), (57, 0.6),
           (61, 0.8), (62, 0.8), (63, 0.5), (69, 0.6), (69.5, 0.7), (71, 0.8), (73, 0.5)]
 # <<< draft:segs
-
-
-class TimeMap:
-    """Monotone cubic (PCHIP) beat -> source-frame map: every speed change is eased.
-    Outside the anchors it keeps running at the end speed (needed while a transition overlaps)."""
-
-    def __init__(self, anchors):
-        self.x = np.array([a[0] for a in anchors], float)
-        self.y = np.array([a[1] for a in anchors], float)
-        h, d = np.diff(self.x), np.diff(self.y) / np.diff(self.x)
-        m = np.zeros(len(self.x))
-        m[0], m[-1] = d[0], d[-1]
-        for i in range(1, len(self.x) - 1):
-            w1, w2 = 2 * h[i] + h[i - 1], h[i] + 2 * h[i - 1]
-            m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i])
-        self.m = m
-
-    def __call__(self, r):
-        r = np.asarray(r, float)
-        rc = np.clip(r, self.x[0], self.x[-1])
-        i = np.clip(np.searchsorted(self.x, rc, side="right") - 1, 0, len(self.x) - 2)
-        h = self.x[i + 1] - self.x[i]
-        u = (rc - self.x[i]) / h
-        y0, y1, m0, m1 = self.y[i], self.y[i + 1], self.m[i] * h, self.m[i + 1] * h
-        p = (2 * u**3 - 3 * u**2 + 1) * y0 + (u**3 - 2 * u**2 + u) * m0 + (-2 * u**3 + 3 * u**2) * y1 + (u**3 - u**2) * m1
-        dp = ((6 * u**2 - 6 * u) * y0 + (3 * u**2 - 4 * u + 1) * m0 + (-6 * u**2 + 6 * u) * y1 + (3 * u**2 - 2 * u) * m1) / h
-        lo, hi = r < self.x[0], r > self.x[-1]
-        p = np.where(lo, self.y[0] + self.m[0] * (r - self.x[0]), np.where(hi, self.y[-1] + self.m[-1] * (r - self.x[-1]), p))
-        dp = np.where(lo, self.m[0], np.where(hi, self.m[-1], dp))
-        return p, dp / FPB                # source frame, playback speed (1 = real time)
 
 
 # ---- musical beats -> frames (SYNC 2). Before this loop every beat in SEGS is musical; after it s["a"], s["kills"], s["r0"], s["r1"]

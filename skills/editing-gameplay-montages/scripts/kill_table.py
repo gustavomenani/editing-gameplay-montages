@@ -15,9 +15,10 @@ For each kill:
           (2 to 6 seen).
   lag     shot frame - K: first value for the segment's `lag` (kill_lags.py refines it; 1.4 to 3.3
           frames on the house example). A clip whose sound is voice chat gives a meaningless shot.
--> gallery_N.jpg (one row per kill: tiles K-6 -3 -2 -1 +0 +1 +2 +3 +6) and kills.json, a record for you;
-   no other script reads it."""
-import json, subprocess
+-> gallery_N.jpg (one row per kill: tiles K-6 -3 -2 -1 +0 +1 +2 +3 +6) and kill_table.json, this tool's table (one list
+   per clip; no other script reads it). kills.json is kills_auto.py's {id: {clip, K, ...}} list, the one the drafters
+   and kverify.py read: this tool never writes it, it leaves it as it is and says where the table went."""
+import json, os, subprocess
 import numpy as np
 import cv2
 import clipio
@@ -72,7 +73,9 @@ for c, bs in BANNER.items():
             cv2.rectangle(im, (0, 0), (TW, 17), (0, 0, 0), -1)
             cv2.putText(im, "%s K=%d %+d" % (c, K, off), (3, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
             tiles.append(im)
-json.dump(table, open("kills.json", "w"), indent=1)
+json.dump(table, open("kill_table.json", "w"), indent=1)
+print("kill_table.json written" + ("; kills.json exists here and was left untouched (it is kills_auto.py's {id: entry} kill list, "
+                                   "not this table's {clip: [records]} layout)" if os.path.exists("kills.json") else ""))
 n = len(OFFS)
 per = n * 9
 for s in range(0, len(tiles), per):
@@ -81,5 +84,5 @@ for s in range(0, len(tiles), per):
     for i, im in enumerate(chunk):
         sheet[TH * (i // n):TH * (i // n + 1), TW * (i % n):TW * (i % n + 1)] = im
     cv2.imwrite(f"gallery_{s // per}.jpg", sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
-print("gallery_0.jpg .. gallery_%d.jpg: one row per kill (9 rows per sheet), tiles K-6 -3 -2 -1 +0 +1 +2 +3 +6; kills.json written"
+print("gallery_0.jpg .. gallery_%d.jpg: one row per kill (9 rows per sheet), tiles K-6 -3 -2 -1 +0 +1 +2 +3 +6; kill_table.json written"
       % ((len(tiles) + per - 1) // per - 1))

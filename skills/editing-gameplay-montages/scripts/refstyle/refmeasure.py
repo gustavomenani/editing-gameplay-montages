@@ -231,13 +231,15 @@ def _script(name):
     raise SystemExit("%s not found next to ref_analyze.py (copy scripts/ and scripts/refstyle/ into the project first)" % name)
 
 
-def beat_grid(audio_src, t0=0.0, t1=None):
+def beat_grid(audio_src, t0=0.0, t1=None, offset_s=0.0):
     """The tempo and the beat grid of the sound of `audio_src` with music_tempo.py + music_grid.py (the project's own tools).
     music_tempo.py prints no "best fit" when it finds NO TEMPO (a WEAK fit that is also not steady: -> dict(error=...), its stderr reason; a WEAK
     but steady fit is used and `weak` is True); music_grid.py refuses a tempo that does not fit
     ("N fits better": exit 1, a `run:  python music_grid.py N BEAT0` line) and this function then runs it again with N and that BEAT0 (a funk song:
     95.7 -> 95.00); every WARNING line of both tools (tempo not steady, constant grid NOT adequate, beat phase wanders) goes to `notes`, and
     `grid_adequate` is False for the first two: an edit built on such a reference must place on measured hits, not on the grid.
+    `offset_s` = where the sound starts against the picture (probe's av_offset_s): the tools read the sound's own clock, so the returned beat0
+    is moved onto the video clock by it (0.0 = the two start together; without it every lattice phase shifts by the offset).
     -> dict(bpm, beat0, members=[(bpm, strength, between share)], weak, notes, grid_adequate, grid_spread_ms) or dict(error=...)."""
     try:
         out, err = _run_script([_script("music_tempo.py"), audio_src])
@@ -277,14 +279,16 @@ def beat_grid(audio_src, t0=0.0, t1=None):
     if weak:
         note.append("a WEAK fit (strength under 2.5x), trusted because music_tempo.py's 30 s window and beat-phase steadiness checks agree")
     period = 60.0 / bpm
-    first = first % period
+    first = (first + offset_s) % period
     return dict(bpm=round(bpm, 3), beat0=round(first, 4), members=members, weak=weak, notes=note, grid_adequate=adequate,
                 grid_spread_ms=float(med.group(2)) if med else None, track_seconds=dur)
 
 
-def audio_pulses(src, bpm, beat0, step=0.5):
+def audio_pulses(src, bpm, beat0, step=0.5, offset_s=0.0):
     """How hard the track hits on every `step` beat of the grid: kick (low), snare / clap (mid), hat (high), each 0..1.
-    Same measure as music_pulses.py. -> (times, low, mid, high) arrays."""
+    Same measure as music_pulses.py. `beat0` is the video-clock phase of the grid when `offset_s` is where the sound starts against the
+    picture (probe's av_offset_s): the samples are read at beat0 - offset_s and the returned times are on the video clock.
+    -> (times, low, mid, high) arrays."""
     SR = 44100
     raw = subprocess.run([FF, "-v", "error", "-i", src, "-map", "0:a:0", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"], capture_output=True).stdout
     m = np.frombuffer(raw, np.float32)
@@ -311,7 +315,7 @@ def audio_pulses(src, bpm, beat0, step=0.5):
             return 0.0, 0.0
         return float(e[a_lo:a_hi].max()), float(e[a_lo:a_hi].max() / (e[lo:hi].mean() + 1e-4))
     per = 60.0 / bpm
-    ts = np.arange(beat0 % per, len(m) / SR - 0.1, per * step)
+    ts = np.arange((beat0 - offset_s) % per, len(m) / SR - 0.1, per * step)
     rl, rm, rh = np.percentile(el, 99), np.percentile(em, 99), np.percentile(eh, 99)
     out = np.zeros((len(ts), 3))
     for i, t in enumerate(ts):
@@ -321,7 +325,7 @@ def audio_pulses(src, bpm, beat0, step=0.5):
         out[i] = (min(1.0, al / rl) * min(1.0, max(0.0, (ql - 1.3) / 2.0)),
                   min(1.0, am / rm) * min(1.0, max(0.0, (qm - 1.5) / 3.0)),
                   min(1.0, ah / rh) * min(1.0, max(0.0, (qh - 1.5) / 3.0)))
-    return ts, out[:, 0], out[:, 1], out[:, 2]
+    return ts + offset_s, out[:, 0], out[:, 1], out[:, 2]
 
 
 # ------------------------------------------------------------------------------------------------ drum attacks, same song, pops
@@ -343,7 +347,7 @@ def drum_attacks(src, t1=None, offset_s=0.0):
     return [dict(t=float(t), band=b, rise=float(r)) for t, b, r in bh.attacks(x, offset_s)]
 
 
-def same_song(ref_src, song_src, sr=11025, hop=64):
+def same_song(ref_src, song_src, sr=11025, hop=64, offset_s=0.0):
     """Is the reference's sound the user's song, and where?
     1. onset envelopes (log RMS rise, 5.8 ms hop) of both sounds, cross-correlated: the 6 best peaks (0.5 s apart) are the candidate offsets
        (a loop-based song repeats, so the best onset peak alone can be a wrong bar: a funk song 0.238 against 0.233).
@@ -351,6 +355,8 @@ def same_song(ref_src, song_src, sr=11025, hop=64):
        (+-0.25 s): 0.6-0.9 where the song is untouched, lower where the editor laid sounds over it. Windows at 0.3 or better vote; the
        candidate with most votes wins; its offset is the median of its windows (0.1 ms resolution, parabolic peak); the song is the same when
        30 % of the windows (at least 3) vote (a funk reference: 13 of 13; another song: 0 of 16).
+    `offset_s` = where the reference's sound starts against its picture (probe's av_offset_s): the correlation reads the sound's own clock,
+    so the returned offset is on the video clock (the song's own time of video time t is t + offset_s).
     -> dict(same, offset_s, ncc (median of the voting windows), score, second, windows_good, windows, offset_std_ms): the song's own time of
     reference time t is t + offset_s."""
     ref = _decode_mono(ref_src, sr)
@@ -417,7 +423,7 @@ def same_song(ref_src, song_src, sr=11025, hop=64):
     if len(offs) < max(3, 0.3 * total):
         none.update(windows_good=len(offs), windows=total)
         return none
-    return dict(same=True, offset_s=round(float(np.median(offs)), 5), ncc=round(float(np.median(nccs)), 3), score=round(float(c[j]), 3), second=round(second, 3),
+    return dict(same=True, offset_s=round(float(np.median(offs)) - offset_s, 5), ncc=round(float(np.median(nccs)), 3), score=round(float(c[j]), 3), second=round(second, 3),
                 windows_good=len(offs), windows=total, offset_std_ms=round(float(np.std(offs)) * 1000.0, 2))
 
 
@@ -707,7 +713,11 @@ def motion_series(S, cuts, fps):
 
 def speed_feel(mo, cuts, fps, exclude_from=None, black=None):
     """Slow motion and freezes. A clip's real-time speed is taken as the 85th percentile of its own motion after the blur frames;
-    the typical speed is the median of those over the clips. Slow = motion below 35 % of typical for 5 frames or more."""
+    the typical speed is the median of those over the clips. Slow = motion below 60 % of typical for 5 frames or more: the drafter's
+    SLOW_BELOW (draft_ref_timeline.py, body_slow_share), so the two sides of the comparison use ONE threshold (35 % here made the
+    reference read less slow motion than it shows, and the draft landed under it every time). The slow-motion RATE (the floor of
+    fall(), 0.06-0.16x in this style) stays the median of the frames under 35 %: the plateau of the slow motion, not its eases,
+    which at 60 % would read 0.3-0.5x and make the draft hold the death at far less slow motion."""
     m = mo["m"].copy()
     n = len(m)
     marks = [0] + [c["frame"] for c in cuts] + [n]
@@ -729,7 +739,8 @@ def speed_feel(mo, cuts, fps, exclude_from=None, black=None):
     if black is not None:
         valid &= ~black
     freeze = valid & (D < 0.5)
-    slow = valid & (ms < 0.35 * typical) & ~freeze
+    slow = valid & (ms < 0.60 * typical) & ~freeze          # SLOW_BELOW in draft_ref_timeline.py: the SHARE counts the eases too
+    deep = valid & (ms < 0.35 * typical) & ~freeze          # the RATE is the plateau, not the eases (see the docstring)
     # runs of at least 5 frames
     run = np.zeros(n, bool)
     i = 0
@@ -745,9 +756,10 @@ def speed_feel(mo, cuts, fps, exclude_from=None, black=None):
         else:
             i += 1
     slow_run = run & slow
+    deep_run = run & deep & (ms > 0.02 * typical)           # the plateau of the slow motion, for the rate only
     rate = None
-    if slow_run.sum() >= 10:
-        rate = float(np.median(ms[slow_run & (ms > 0.02 * typical)]) / typical) if np.any(slow_run & (ms > 0.02 * typical)) else None
+    if deep_run.sum() >= 10:
+        rate = float(np.median(ms[deep_run]) / typical)
     # dup runs: how many frames in a row repeat (a stutter or a 30 fps source)
     dup = valid & (D < 0.5)
     runs, i = [], 0

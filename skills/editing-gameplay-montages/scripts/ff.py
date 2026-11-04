@@ -91,8 +91,11 @@ def check_pts(video, n_frames, joins=(), fps=60):
                        capture_output=True, text=True)
     if r.returncode or not r.stdout.strip():
         return ["ffprobe could not read %s: %s" % (video, r.stderr.strip()[-200:])]
-    j = json.loads(r.stdout)
-    tb = Fraction(j["streams"][0]["time_base"])
+    try:
+        j = json.loads(r.stdout)
+        tb = Fraction(j["streams"][0]["time_base"])
+    except (ValueError, KeyError, IndexError, TypeError) as e:      # no video stream, or output that is not the JSON asked for: a problem, not a traceback
+        return ["ffprobe's output for %s cannot be read (%s: %s)" % (video, type(e).__name__, str(e)[:120] or "empty")]
     pts = sorted(int(p["pts"]) for p in j["packets"] if "pts" in p)
     out = []
     if len(pts) != n_frames:

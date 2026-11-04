@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Instala a skill editing-gameplay-montages em ~/.claude/skills e confere o que o computador precisa.
 
@@ -12,6 +12,8 @@
   2. Confere o que a skill precisa e diz, em português, o que está OK e o que falta, com o comando exato do winget:
      Git for Windows (Git Bash), uv, ffmpeg, placa de vídeo com Vulkan, fonte Impact e espaço livre em disco.
   Nada é instalado sem você pedir: o script só imprime os comandos. Com -Instalar ele roda os comandos do winget que faltam.
+  Sai com código 0 quando nada obrigatório falta e com 1 quando falta algo (a mesma regra do doctor.py), então dá para
+  conferir o computador de dentro de um script.
 
 .PARAMETER Instalar
   Roda o winget para instalar o que faltar (Git, uv, ffmpeg). Sem esta opção, só mostra os comandos.
@@ -68,8 +70,19 @@ try {
 $arquivos = @(Get-ChildItem -LiteralPath $destino -Recurse -File)
 $modelo = Join-Path $destino "models\rife-v4.25\flownet.bin"
 $modeloOrigem = Join-Path $origem "models\rife-v4.25\flownet.bin"
-if (-not (Test-Path -LiteralPath $modelo) -or (Get-Item -LiteralPath $modelo).Length -ne (Get-Item -LiteralPath $modeloOrigem).Length) {
-    Falta "a cópia do modelo do RIFE (models\rife-v4.25\flownet.bin) não ficou igual à original. Rode de novo; se repetir, clone o repositório outra vez."
+# a origem pode não existir (clone sem o modelo, ou um ponteiro do Git LFS no lugar dele): Test-Path antes de Get-Item, senão o
+# erro cru do PowerShell aparece DEPOIS de a skill já ter sido copiada
+if (-not (Test-Path -LiteralPath $modeloOrigem)) {
+    Falta "o modelo do RIFE não está em $modeloOrigem (o clone não trouxe models\rife-v4.25\flownet.bin). Clone o repositório de novo; se ele usa Git LFS, rode  git lfs pull"
+    exit 1
+}
+$tamOrigem = (Get-Item -LiteralPath $modeloOrigem).Length
+$tamModelo = -1
+if (Test-Path -LiteralPath $modelo) { $tamModelo = (Get-Item -LiteralPath $modelo).Length }
+if ($tamModelo -ne $tamOrigem -or $tamOrigem -lt 1MB) {          # 1 MB: um ponteiro do Git LFS (umas centenas de bytes) copiaria com o mesmo tamanho
+    $porque = if ($tamOrigem -lt 1MB) { "o arquivo de origem tem só $tamOrigem bytes: é um ponteiro do Git LFS, não o modelo (~11 MB). Rode  git lfs pull  (ou clone o repositório outra vez)" }
+              else { "a cópia ficou com $tamModelo bytes contra $tamOrigem. Rode de novo; se repetir, clone o repositório outra vez" }
+    Falta "a cópia do modelo do RIFE (models\rife-v4.25\flownet.bin) não ficou igual à original: $porque"
     exit 1
 }
 Ok "skill instalada em: $destino ($($arquivos.Count) arquivos, modelo do RIFE conferido)"
@@ -225,4 +238,10 @@ Write-Host 'Próximos passos:'
 Write-Host '  1. Abra o Claude Code numa pasta e peça o vídeo (ex.: "faça um montage com os clipes de C:\Users\...\Videos\valorant e a música X").'
 Write-Host '  2. Quando o projeto tiver o venv (a skill cria: pipeline.md, Setup), confira tudo de verdade, inclusive o RIFE na placa:'
 Write-Host '       ./venv311/Scripts/python doctor.py        (dentro da pasta _editor do projeto)'
+# mesma regra do doctor.py: 0 = tudo encontrado, 1 = falta algo. Depois de -Instalar, feche e abra o terminal e rode de novo
+# para conferir (o PATH só atualiza em terminais novos)
+if ($faltam.Count -gt 0) {
+    Write-Host ("install.ps1: saindo com codigo 1: falta " + ($faltam -join ', ') + " (0 = nada falta, 1 = falta algo)") -ForegroundColor Yellow
+    exit 1
+}
 exit 0

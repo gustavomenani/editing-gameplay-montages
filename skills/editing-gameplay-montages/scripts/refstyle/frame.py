@@ -9,9 +9,10 @@ cover.py and cover_plates.py (one place, so they cannot disagree).
 Values for the vertical frame are decided here and nowhere else:
   WIN_*     the gameplay window; its centre is the exact centre of the frame, so the lyric words sit on the exact
             middle of the screen over the middle of the gameplay (the user's rule, unchanged)
-  CAP_K     lyric caps in the vertical frame are CAP_K (0.60) of the horizontal ones: 136 / 121 px, 22 / 20 % of the window's height
-            (the horizontal 226 / 202 px are 21 / 19 % of 1080); a phone shows the whole frame small, so a little above the
-            window's own 0.5625 scale (1080 / 1920), which would give the same share of the picture as in the horizontal frame
+  CAP_K     lyric caps in the vertical frame are CAP_K (0.60) of the horizontal ones: 135 / 121 px, 22 / 20 % of the window's height
+            (the horizontal 226 / 202 px are 21 / 19 % of 1080; truncated: 0.60 x 226 = 135.6 and user-rules.md lists 135, while a rounded
+            136 was 1 px over the stated rule). A phone shows the whole frame small, so a little above the window's own 0.5625 scale
+            (1080 / 1920), which would give the same share of the picture as in the horizontal frame
   WORD_CAP* the horizontal caps (red intro words / all others) in px at 1080p, which textfx.py scales by CAP_K
   WORD_MAXW widest word: 70 % of the frame width in both frames (1344 px; 756 px, a 162 px margin each side of the 1080 canvas)
   KS        scale of the blur-in / streak distances, in canvas widths"""

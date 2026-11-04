@@ -16,11 +16,16 @@ What it does for each clip
      as a pop-in. With an `own` rule in the profile (colour tests, e.g. Valorant's lime accent + teal body, CS2's
      red outline) only the rows that pass are kept. Without one (generic) EVERY row is kept: teammates' and
      enemies' kills too; the sheets show which are yours.
-  2. SHOT FRAME K. The gunshots of the clip's own audio (sudden rise of the high-frequency level) in the window
-     where the shot must lie before the row (profile lag.feed_frames), refined on the picture: the muzzle flash
-     (newly bright pixels in the profile's weapon region) and, if the profile has an ammo region, the frame where
-     the ammo digits change (mykills.py's rule). Candidates are scored by how many of the three agree; the best wins.
-     With several shots in the window (a spray) the one nearest the usual feed latency (lag.typical) is taken.
+  2. SHOT FRAME K. Three signals, inside the window where the shot must lie before the row (the profile's
+     lag.feed_frames, and up to lag.long for a row that arrives late: there only a shot with ammo AND flash counts):
+     the gunshots of the clip's own audio (sudden rise of the high-frequency level), the muzzle flash (newly bright
+     pixels in the profile's weapon region) and, if the profile has an ammo region, the frame where the ammo digits
+     change (kverify.py's measure, any digit colour: the counter also turns red at low ammo). A flash 1..4 frames after
+     another candidate is that shot's echo; a candidate whose counter is readable on both sides and does not step is no
+     shot (an ability flash, the death highlight). Of the remaining shots the one nearest the usual feed latency
+     (lag.typical) wins (ties: the earlier frame), so a spray's follow-up shot does not replace the killing shot; the
+     signals that agree set conf and method. Nothing at all: K = feed - lag.typical, conf guess. no_shot = the counter
+     is readable over the WHOLE lag range and never steps (an ability / knife kill, or not a gun kill).
   3. OUTPUT.
        kills.json       {id: {clip, K, feed, conf, method, how, verified, game, changes, ...}}: K = shot frame (flash visible on K, absent on
                         K-1), feed = first frame of the row appearing, conf = high | medium | low | guess,
@@ -43,7 +48,8 @@ Profile fields (games/valorant.json is the reference, "notes" says where every n
   feed.region [x,y,w,h]   where the rows live; feed.row_h  height of one row; feed.row_min_w  width of the shortest row;
   feed.align right|left   which edge the rows hug; feed.own  null or {"masks": [{"name","hue":[[lo,hi]],"s_min","v_min",
   "min_px"}]}: the row is yours when EVERY colour mask has at least min_px pixels inside the row band (OpenCV hue 0-179);
-  weapon.region           where the muzzle flash shows (also the zoom tiles); ammo {"region","digit_min"} or null;
+  weapon.region           where the muzzle flash shows (also the zoom tiles); ammo {"region"} or null (digits are found by
+                          their contrast, any colour: the digit_min of old profiles is no longer used);
   lag.feed_frames [lo,hi] frames from K to the row appearing; lag.typical; lag.audio_frames [lo,hi] and
   lag.audio_typical: frames from the flash to the gunshot in the audio; validated false = nobody checked it on footage.
 
@@ -54,6 +60,7 @@ import preflight
 import numpy as np
 import cv2
 import clipio
+import kverify
 from ff import FF
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,12 +70,20 @@ LOOK = 12            # frames from "before the row" to "row finished": slide-in 
 HOLD = 6             # frames the finished row must stay still
 CHANGED = 40         # max-channel level change that counts as "a pixel changed"
 STILL = 10           # ... and as "a pixel did not move"
-AMMO_CHG = 0.10     # share of the digit pixels that must change at one frame for an ammo step (one digit changing: 0.1-0.25 (6 -> 5 on c18: ~0.12), noise 0.01)
-AMMO_QUIET = 0.15   # ... and the 2 frames around it must be quieter than that (0.08 lost real steps whose neighbours flickered 0.08-0.15)
+AMMO_CHG = kverify.AMMO_MIN  # mean |change| of the ammo box at one step (kverify's measure: 13-58 at a real step, <= 3-5 on quiet frames)
+AMMO_QUIET = 6.0    # ... and the counter is READABLE only on frames quieter than this (a muzzle flash or recoil moves the whole box)
+DIGIT_CONTRAST = 80  # max-channel p95 - p5 of the ammo box that reads as digits: any digit colour (Valorant's red at low ammo included)
+NO_SHOT_MARGIN = 2   # frames the counter must also be readable either side of the profile's lag range before "no bullet was fired" is claimed
 DUP_NCC = 0.9       # last resort: a row whose name+portrait correlates this much with an earlier row of the clip is that row again
+DUP_GAP = 90        # ... and only when that row was still on screen this recently: a scroll moves a row a slot in a frame or two, a flash hides it for a moment
+DUP_SLOT = 8        # px: ... and within one slot of where it was (a row that moved by its pitch is the same row, whichever way the feed moves)
 ROW_LIFE = 300      # frames a row stays on screen (valid frames of the rows measured: up to 300 = 5 s)
 KEEP_ROW = 600      # frames a row that vanished (flash, scroll) is remembered: a row stays on screen about 8 s, so it comes back as itself, not as a second kill
-OWN_DELAY = 5       # frames after the band changed within which an own row's colours must show (a row appears at once)
+OWN_DELAY = 5       # frames the finished band may take before an own row's colours show (a fade needs longer than a pop; the band's arrival is its first visible frame)
+FADE_CHG = 16       # max-channel change that it takes for "not the background any more" while a row fades in (CHANGED = 40 is the pop-in level)
+FADE_COV = 0.35     # share of the band that must differ from the pre-animation baseline before the row counts as visible
+FADE_MARGIN = 0.25  # ... above the band's own pre-animation noise (the scene behind the feed moves too)
+ROW_LEFT_LUMA = 20  # mean level (0-255) the band must GAIN over its pre-animation baseline to count as "the row left": the plate is near black
 
 
 def load_profile(game):
@@ -162,6 +177,25 @@ def line_runs(mask):
     return list(zip(idx[::2], idx[1::2]))
 
 
+def same_row_again(onset, y0, big, seen, pitch):
+    """The earlier own row this appearance is a second sighting of, or None: seen = [(onset, y0, big, last)] of the own rows
+    kept so far (last = the last frame that row was seen on), big = the victim's name+portrait fingerprint, pitch = feed.row_pitch.
+    A row that vanished comes back as ITSELF only when it was still on screen a moment ago (DUP_GAP frames: a scroll moves a row
+    a slot within a frame or two, a flash hides it for a moment) and within a slot of where it was. WHY the old rule (name+portrait
+    NCC >= 0.9 within 900 frames = 15 s) was wrong: two kills of the SAME enemy in a deathmatch have the same victim name and
+    portrait, so the second kill was thrown away as "same row again" although it is a new row with its own shot, and its row
+    appears only after the first row has left (seconds later, far beyond DUP_GAP)."""
+    for i in range(len(seen) - 1, -1, -1):
+        _, py, pg, last = seen[i]
+        # still on screen a moment ago: a scroll moves a row a slot within a frame or two and a flash hides it for a moment,
+        # while a second kill of that victim appears only after the first row has left - much later than DUP_GAP frames
+        if not 0 <= onset - last <= DUP_GAP:
+            continue
+        if abs(y0 - py) <= pitch + DUP_SLOT and float((pg * big).mean()) >= DUP_NCC:
+            return seen[i]
+    return None
+
+
 def scan_rows(clip, prof, trace=None):
     """Rows of the kill feed found BY COLOUR and followed over time: [{onset, y0, y1, own, why, counts, n}] (y in frame pixels,
     onset = the first frame the finished row is there: killer colour, victim colour and the own-kill accent all present).
@@ -193,13 +227,20 @@ def scan_rows(clip, prof, trace=None):
                 runs.append((a, b))
         return [(a, b) for a, b in runs if lo_h <= b - a <= hi_h]
 
+    def portrait_fp(rgb):
+        """Normalised grey fingerprint of a band's victim portrait (its last FPX px): rows of one victim correlate near 1."""
+        g = cv2.resize(cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2GRAY), (FPW, FPH), interpolation=cv2.INTER_AREA).astype(np.float32)
+        return (g - g.mean()) / (g.std() + 1e-3)
+
     for i, f in enumerate(stream(clip, fx, fy, fw, fh)):
         n = i + 1
         if i % 60 == 0:
             live = [t for t in live if i - t["last"] <= KEEP_ROW]
         hsv = cv2.cvtColor(f, cv2.COLOR_RGB2HSV)
         ms = {nm: mask_of(hsv, m) for nm, m in specs.items()}
-        for a, b in band_runs(ms):
+        runs = band_runs(ms)
+        pics = {(aa, bb): portrait_fp(f[aa:bb, -FPX:]) for aa, bb in runs}     # every band of this frame: the "is that row still there?" test below needs them
+        for a, b in runs:
             sl = slice(max(0, a - 2), min(fh, b + 2))
             ok, cnt = own_row_ok(f[sl], own, feed.get("align", "right"))
             cols = np.flatnonzero(np.logical_or.reduce([ms[nm][sl] for nm in band_names]).any(0))
@@ -212,8 +253,7 @@ def scan_rows(clip, prof, trace=None):
             if not ok:
                 lime_ok = all(cnt[m["name"]] >= m["min_px"] for m in own["masks"])
                 why = "death" if lime_ok else "other player"
-            g = cv2.resize(cv2.cvtColor(np.ascontiguousarray(f[a:b, -FPX:]), cv2.COLOR_RGB2GRAY), (FPW, FPH), interpolation=cv2.INTER_AREA).astype(np.float32)
-            g = (g - g.mean()) / (g.std() + 1e-3)
+            g = pics[(a, b)]
             big = cv2.resize(cv2.cvtColor(np.ascontiguousarray(f[a:b, -170:]), cv2.COLOR_RGB2GRAY), (96, 16), interpolation=cv2.INTER_AREA).astype(np.float32)
             big = (big - big.mean()) / (big.std() + 1e-3)                  # victim's name + portrait: tells a row that came back from another row
             best, bs = None, 0.0
@@ -222,7 +262,17 @@ def scan_rows(clip, prof, trace=None):
                     continue
                 ncc = max(float((t["fp"] * g).mean()), float((t["fp0"] * g).mean()))
                 near = abs(a - t["a"]) <= 8 and ((i - t["last"] <= 2 and ncc >= 0.3) or i - t.get("onset_own", t["onset"]) < ROW_LIFE)   # in its slot, before it can have expired: the same row       # an old row fading out changes its look, it is still that row
-                if (near or ncc >= 0.8) and ncc > bs:
+                # ... and the portrait alone does not make a band the row in `t` when the band sits at ANOTHER slot: a row that only
+                # MOVED was seen a moment ago and left a DIFFERENT picture at its old slot (the feed shifts all its rows when one
+                # arrives or expires), while the same picture still sitting at t["a"] means that row is on screen and this band is a
+                # SECOND row of the same victim - a deathmatch repeat, a kill of its own. The test assumes neither scroll direction;
+                # the old rule (portrait anywhere, ncc >= 0.8) swallowed that second kill into the first row's track, so it never
+                # became a kill at all. A row that has been gone for more than DUP_GAP frames is not moving: it expired, and the
+                # band is a new kill of that victim at the feed's entry slot.
+                moved = (ncc >= 0.8 and abs(a - t["a"]) > 8 and i - t["last"] <= DUP_GAP and not any(
+                    abs(aa - t["a"]) <= 8 and max(float((t["fp"] * q).mean()), float((t["fp0"] * q).mean())) >= 0.8
+                    for (aa, _), q in pics.items()))
+                if (near or moved) and ncc > bs:
                     best, bs = t, ncc
             if best is None and any(
                     i - t["last"] <= 45 and t["a"] > a + 8 and max(float((t["fp"] * g).mean()), float((t["fp0"] * g).mean()), float((t["big"] * big).mean())) >= 0.5 for t in live):
@@ -233,23 +283,24 @@ def scan_rows(clip, prof, trace=None):
                 live.append(tracks[-1])
             else:
                 best.update(a=a, b=b, fp=g, last=i, n=best["n"] + 1)
-                if ok and not best["own"] and best["why"] == "other player":        # the bar fading in had no accent yet: now the row is complete
+                if ok and not best["own"]:                          # the bar fading in had no accent yet, or its first complete frame still showed the victim colour: now the row is complete
                     best.update(own=True, why=None, counts=cnt, onset_own=i, y0=fy + a, y1=fy + b, big=big, fp0=g)
                 elif best["n"] <= 3:                                # the first frames of a row decide where it is and what it is
                     best.update(y0=fy + a, y1=fy + b)
     if n != clipio.n_frames(clip):
         print(f"  WARNING {clip}: decoded {n} frames but pts/{clip}.csv has {clipio.n_frames(clip)}: frame indices may be off")
     events, seen = [], []
+    pitch = prof["feed"].get("row_pitch", row_h)
     for t in sorted(tracks, key=lambda t: t.get("onset_own", t["onset"])):
         if t["onset"] < 3 or t["n"] < 8:                          # there when the clip started / flicker of scenery
             continue
-        if t["own"]:                                              # the same row again (it flickered out and back, e.g. under a flash): not a second kill
+        if t["own"]:                                              # the same row again (flickered, or scrolled a slot): not a second kill
             o = t.get("onset_own", t["onset"])
-            trace.append((o, t["y0"], t["y1"], "ncc", [round(float((q * t["big"]).mean()), 2) for p, q in seen if o - p < 900]))
-            if any(o - p < 900 and float((q * t["big"]).mean()) >= DUP_NCC for p, q in seen):
+            trace.append((o, t["y0"], t["y1"], "ncc", [round(float((q * t["big"]).mean()), 2) for p, _, q, _ in seen if o - p < 900]))
+            if same_row_again(o, t["y0"], t["big"], seen, pitch) is not None:
                 trace.append((o, t["y0"], t["y1"], "same row again"))
                 continue
-            seen.append((o, t["big"]))
+            seen.append((o, t["y0"], t["big"], t["last"]))
         ev = {"onset": int(t.get("onset_own", t["onset"])), "y0": int(t["y0"]), "y1": int(t["y1"]), "own": t["own"], "why": t["why"], "counts": t["counts"], "n": int(t["n"])}
         if t["own"]:
             ev["t_own"] = ev["onset"]
@@ -268,7 +319,8 @@ def scan_feed(clip, prof, trace=None):
 
 
 def scan_feed_diff(clip, prof, trace=None):
-    """Rows appearing in the feed region: [{onset, y0, y1, own, counts}] (y in frame pixels, onset = frame index).
+    """Rows appearing in the feed region: [{onset, y0, y1, own, counts}] (y in frame pixels, onset = the first frame the row is
+    visibly there: the start of a fade, not the frame its animation ends).
     trace: a list that receives (frame, y0, y1, reason, ...) for every candidate band that was thrown out (diagnostics)."""
     trace = [] if trace is None else trace
     fx, fy, fw, fh = prof["feed"]["region"]
@@ -303,11 +355,22 @@ def scan_feed_diff(clip, prof, trace=None):
         a, b, j = r["a"], r["b"], r["j1"]
         pre = small[j - 2]
         rows = slice(max(0, 2 * a - 2), 2 * b + 2)
-        tex = lambda s: float(np.abs(s[:, 1:] - s[:, :-1]).max(2).mean())
-        t_pre, t_post = tex(pre[a:b]), tex(small[get(j + look)][a:b])
-        if not own and t_post < 0.8 * t_pre:
-            trace.append((j, fy + 2 * a, fy + 2 * b, "flatter", round(t_pre, 1), round(t_post, 1)))
-            return                                                  # no own rule: a band that got flatter is a row going away
+        post = small[get(j + look)]
+        # The band as it was BEFORE its animation (median of a few frames): the reference of both tests below. j1-2 is not
+        # that: it can already show the finished band, and the onset search further down compares against the same frames.
+        base_keys = [k for k in range(max(0, r["j0"] - look - 8), max(1, r["j0"] - look - 1)) if k in small]
+        base = np.median([small[k][a:b] for k in base_keys], axis=0) if base_keys else pre[a:b]
+        if not own:
+            # Without an own rule the band is only a candidate for "a row appeared", and the old test threw it away when
+            # the band got FLATTER than the frame before the finished band ("a row going away"). A kill-feed row is a
+            # near-black plate, so over a scene with a texture of its own it is the FLATTEST thing in the band: every row
+            # that appeared over a busy map was dropped (synthetic row over a striped scene: texture 14.9 against 116.0).
+            # Texture cannot tell the two directions apart either (a row leaving a flat sky is flatter too): the
+            # luminance can. Appearing puts the dark plate in the band, leaving takes it away, so compare the settled
+            # band with the PRE-ANIMATION baseline and throw it away only when the band got BRIGHTER: the row left.
+            if float(post[a:b].mean()) > float(base.mean()) + ROW_LEFT_LUMA:
+                trace.append((j, fy + 2 * a, fy + 2 * b, "row left", round(float(base.mean()), 1), round(float(post[a:b].mean()), 1)))
+                return
         if own and all(color_counts(full[max(0, r["j0"] - 2)][rows], own)[m["name"]] >= m["min_px"] for m in own["masks"]):
             trace.append((j, fy + 2 * a, fy + 2 * b, "own row there before"))
             return                                                  # an own row was already there before the change: it is leaving
@@ -324,6 +387,17 @@ def scan_feed_diff(clip, prof, trace=None):
             if (np.abs(small[t][a:b] - pre[a:b]).max(2) > CHANGED).mean() >= 0.4:
                 onset = t
                 break
+        # The test above compares against j1-2, i.e. a frame already inside the animation: a row that fades or slides in
+        # without a 40-level change between two frames only shows its END there. Measure the arrival against frames from
+        # before the animation; the noise floor keeps a moving scene behind the feed from counting as the row. A pop-in
+        # crosses both tests on the same frame, so it keeps the frame it had.
+        if base_keys:
+            noise = float(np.median([(np.abs(small[k][a:b] - base).max(2) > FADE_CHG).mean() for k in base_keys]))
+            floor = max(FADE_COV, noise + FADE_MARGIN)
+            for t in range(max(0, r["j0"] - look - 8), j + 1):
+                if t in small and (np.abs(small[t][a:b] - base).max(2) > FADE_CHG).mean() >= floor:
+                    onset = min(onset, t)
+                    break
         ev = {"onset": int(onset), "y0": int(fy + 2 * a), "y1": int(fy + 2 * b), "own": None, "counts": None}
         if own:
             best, first = None, None
@@ -337,7 +411,7 @@ def scan_feed_diff(clip, prof, trace=None):
                     best = (ok, score, cnt, t)
             if best:
                 ev["own"], ev["counts"], ev["t_own"] = bool(best[0]), best[2], int(best[3])
-                if first is not None and first - onset > OWN_DELAY:     # the colours came much later than the band changed: a camera
+                if first is not None and first - j > OWN_DELAY:         # the colours came much later than the finished band: a camera
                     trace.append((j, fy + y0f, fy + y1f, "own colours late"))   # move settling above a row that appears later (found as itself)
                     return
         state["events"].append(ev)
@@ -424,33 +498,45 @@ def rising_runs(score, floor, ratio):
 
 
 def shot_signals(clip, a, b, prof):
-    """Picture signals on frames a..b: {'flash': [frames], 'ammo': [frames]} (absolute frame indices)."""
+    """Picture signals on frames a..b: {'flash': [frames], 'ammo': [frames], 'readable': [frames]} (absolute frame indices).
+    ammo = frames where the counter steps (a bullet was spent); readable = frames where the digits are there and steady."""
     fr = read(clip, a, b)
     wx, wy, ww, wh = prof["weapon"]["region"]
-    V = fr[:, wy:wy + wh, wx:wx + ww].max(3).astype(np.int16)
-    new = np.r_[0, ((V[1:] - V[:-1] > 50) & (V[1:] > 200)).sum((1, 2))].astype(float)
-    flash = [a + k for k in rising_runs(new, 0.0023 * ww * wh, 3.0)]
+    sg = kverify.signals(fr, prof)                       # kverify's ammo / flash series: one definition of both measures for both scripts
+    flash = [a + k for k in rising_runs(sg["flash"], 0.0023 * ww * wh, 3.0)]
     ammo, readable = [], []
     if prof.get("ammo"):
         ax, ay, aw, ah = prof["ammo"]["region"]
-        masks = [fr[i, ay:ay + ah, ax:ax + aw].min(axis=2) > prof["ammo"].get("digit_min", 205) for i in range(len(fr))]
-        chg = np.zeros(len(fr))
-        for i in range(1, len(fr)):
-            chg[i] = (masks[i] ^ masks[i - 1]).sum() / max((masks[i] | masks[i - 1]).sum(), 40)
-        # one digit changing (13 -> 12) moves only about 0.2 of the digit pixels: the threshold must catch it (c02 4659: 0.23)
+        # Valorant turns the counter RED when the magazine is low: the old white-only mask (min RGB > 205) saw 0 px there, so
+        # ammo and readable were empty and find_shot's steady-counter rules (a flash with no bullet, no_shot) never ran.
+        # Measure the box in ANY digit colour (max channel) and call the digits present from its contrast, not from whiteness.
+        v = fr[:, ay:ay + ah, ax:ax + aw].max(3)
+        present = (np.percentile(v, 95, axis=(1, 2)) - np.percentile(v, 5, axis=(1, 2))) >= DIGIT_CONTRAST
+        chg = sg["ammo"]                                 # mean |change| of the whole box: a digit changing moves it, any colour
         ammo = [a + i for i in range(3, len(fr) - 3)
-                if chg[i] > AMMO_CHG and max(chg[i + 1], chg[i + 2], chg[i - 1], chg[i - 2]) < AMMO_QUIET and masks[i].sum() > 60]
-        readable = [a + i for i in range(len(fr)) if masks[i].sum() > 60 and chg[i] < AMMO_QUIET]   # digits there and steady (a muzzle flash washing over them: not readable)
+                if present[i] and chg[i] >= AMMO_CHG and chg[i] > kverify.AMMO_RATIO * chg[i - 1]]
+        readable = [a + i for i in range(len(fr)) if present[i] and chg[i] < AMMO_QUIET]   # digits there and steady (a muzzle flash / recoil over them: not readable)
     return {"flash": flash, "ammo": ammo, "readable": readable}
+
+
+def no_shot_span(feed, lag):
+    """The frames the ammo counter must be readable on before "no bullet was fired for this row" holds: the profile's WHOLE
+    lag range (lag.feed_frames, up to lag.long where a late row is accepted), plus NO_SHOT_MARGIN frames either side.
+    The old test looked at the 13 frames around feed - lag.typical: a row that arrives 15-20 frames after its shot (the
+    third lag window) had its shot outside that window and a kill whose muzzle flash missed the weapon region was then
+    declared "no bullet fired"."""
+    lo, hi = lag["feed_frames"]
+    return range(feed - lag.get("long", hi + 8) - NO_SHOT_MARGIN, feed - lo + NO_SHOT_MARGIN + 1)
 
 
 def find_shot(clip, ev, prof, onsets):
     """K for one feed event: THE SHOT THAT KILLED, i.e. the last shot fired before the row appeared (the row follows the killing
     shot by lag.likely frames, 6 to 10 on the footage), never the first shot of a burst. Returns the dict that goes to kills.json.
     Candidates: ammo-counter changes, muzzle flashes (a flash that follows another candidate within 4 frames is the same shot's
-    echo), gunshots in the audio. Of the candidates inside the likely lag range the LATEST wins; without one, the latest inside
-    the wide range lag.feed_frames; a candidate without picture signal (audio only) only when no picture candidate exists;
-    nothing at all: K = feed - lag.typical, conf guess."""
+    echo), gunshots in the audio. Of the candidates inside the likely lag range the one nearest lag.typical wins (ties: the earlier
+    frame); without one, the same inside the wide range lag.feed_frames; then the rows that arrive late (lag.long), where only a
+    candidate with ammo AND flash counts; nothing at all: K = feed - lag.typical, conf guess, and no_shot when the counter is
+    readable and never steps over the whole lag range."""
     lag = prof["lag"]
     feed = ev["onset"]
     lo, hi = lag["feed_frames"]
@@ -489,7 +575,7 @@ def find_shot(clip, ev, prof, onsets):
     for r0, r1, strong in ((llo, lhi, False), (lo, hi, False), (hi + 1, long_lag, True)):
         inside = [c for c in cands if feed - r1 <= c["f"] <= feed - r0 and (not strong or {"ammo", "flash"} <= set(c["kinds"]))]
         if inside:                                  # (the last range: a shot 13 to 20 frames before the row is taken only when ammo AND flash show it)
-            best = max(inside, key=lambda c: c["f"])
+            best = min(inside, key=lambda c: (abs((feed - c["f"]) - typical), c["f"]))   # nearest the usual feed lag; a spray's follow-up shot is not the kill
             break
     all_shots = sorted({f for kind in ("ammo", "flash") for f in sig[kind]})
     if best:
@@ -500,12 +586,13 @@ def find_shot(clip, ev, prof, onsets):
         K, au, astr = best["f"], best["audio"], best["astr"]
     else:
         gk = feed - typical
-        no_shot = bool(rd) and all(f in rd for f in range(gk - 6, gk + 7))      # the counter is steady all around: no bullet was fired for this row
+        no_shot = bool(rd) and all(f in rd for f in no_shot_span(feed, lag))      # the counter is steady over the whole lag range: no bullet was fired for this row
         near = [(o, s) for o, s in aud if gk - 3 <= o - atyp <= gk + 3]
         astr = None
         if near:                                    # a gunshot is where the row says the shot was: support, but its frame is +-3 (the lag to the row is steadier)
-            astr = max(near, key=lambda q: q[1])[1]
-            K, au, method, conf = gk, atyp, "feed-lag+audio", "low"
+            o, s = max(near, key=lambda q: q[1])
+            astr = s
+            K, au, method, conf = gk, o - gk, "feed-lag+audio", "low"   # the MEASURED offset (audio_after_K is printed and scored): the profile constant was a made-up number for every kill
         else:
             K, au, method, conf = gk, None, "feed-lag", "guess"
     how = "ammo" if best and "ammo" in best["kinds"] else "flash" if best else "guess"      # ammo / flash = K measured on the picture (verified), guess = feed - lag
@@ -807,7 +894,8 @@ def main():
     if args.drop:
         if not os.path.exists("kills.json"):
             sys.exit("kills_auto.py: --drop works on kills.json, which does not exist here: run  python kills_auto.py <game>  first")
-        kills = json.load(open("kills.json", encoding="utf-8"))
+        kills = json.load(open("kills.json", encoding="utf-8-sig"))     # utf-8-sig: a hand-edited kills.json saved by Notepad on Windows
+                                                                        # starts with a BOM, and a plain utf-8 read dies on it
         for i in args.drop.split(","):
             print("dropped", i, kills.pop(i.strip(), "(not there: ids are the keys of kills.json)"))
         json.dump(kills, open("kills.json", "w"), indent=1)
@@ -817,12 +905,12 @@ def main():
         sys.exit("kills_auto.py: src/ has no video clips: put the recordings in clips.json and run  python ingest.py && python mkpts.py  first")
     for c in clips:
         check_clip(c)
-    kills = json.load(open("kills.json", encoding="utf-8")) if os.path.exists("kills.json") else {}
+    kills = json.load(open("kills.json", encoding="utf-8-sig")) if os.path.exists("kills.json") else {}   # utf-8-sig: see --drop above
     old = dict(kills)
     kills = {i: k for i, k in kills.items() if k.get("clip") not in clips}
     nxt = max([int(i) for i in kills] + [-1]) + 1
     sheets, evs = [], []
-    other = json.load(open("rows_other.json", encoding="utf-8")) if os.path.exists("rows_other.json") else {}
+    other = json.load(open("rows_other.json", encoding="utf-8-sig")) if os.path.exists("rows_other.json") else {}
     for c in clips:
         found, other[c] = analyze(c, prof)
         for ev, k in found:

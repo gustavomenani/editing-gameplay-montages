@@ -15,9 +15,11 @@ height of the band's linear envelope across its steepest 6 ms rise, minus the cl
 hits.json:
   {"music", "sr", "definition", "bias_ms": {"low", "mid", "high", "808"}, "bpm", "beat0", "m0", "r0", "r1", "sub",
    "hits": [{"t", "r", "band", "low", "mid", "high", "u4", "dt_ms", "tl", "tm", "th"}, ...]}
-  t      the attack, TRACK seconds (0.1 ms);  r = hit(t)
+  t      the attack, TRACK seconds (rounded to 1 us);  r = hit(t)
   band   the strongest class of the hit: "low" (kick / 808 / bass hit), "mid" (snare / clap: body and crack arriving), "high" (hat)
-  low / mid / high   unclipped strengths (beat_hits' scale: a kick is 0.5 at its weakest that a drafter takes, 1.5 at its strongest)
+  low / mid / high   unclipped strengths (beat_hits' scale: a kick is 0.5 at its weakest that a drafter takes). low and mid have no
+                     upper bound (a hit stronger than the song's 99th-percentile onset is above 1), high is capped at 2.0 (from there
+                     on the class pick already saturates on "clearly a hat")
   u4     the nearest sixteenth-note line of the grid (timeline beat * 4), dt_ms = t - that line (grid time) in ms: ORIENTATION ONLY
   tl / tm / th   the attack time of each class that has a strength there (null when the class has none): a bass cut uses "tl"
 A hit is listed from low 0.25, mid 0.4 or high 0.5 (what music_pulses.py calls weak; --all lists every attack that carries a

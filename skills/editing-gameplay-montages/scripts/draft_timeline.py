@@ -57,10 +57,13 @@ FADE_OUT are lines of the song's grid (an ending has no hit). timeline_example.p
 them (a cut CUT_LEAD frames, a shot HIT_LEAD frames before the nearest frame of its beat); the sound stays on the exact beat.
 
 It refuses, with the numbers, when the inputs cannot fit: too few kicks or snares, a clip without enough footage before
-or after a kill, a length that the kills cannot fill. The file is built from timeline_example.py by replacing the blocks
-between its `# >>> draft:...` / `# <<< draft:...` markers (docstring, music block, cut block, sound block, segments). Few kills
-for a long edit give long lead-ins and long slow motion: the statistics it prints (against the house example with --compare) say so."""
-import argparse, bisect, collections, hashlib, json, math, os, re, sys
+or after a kill, a length that the kills cannot fill, two takes of one clip whose kills would show the same source frames
+twice, and any plan key this style does not implement (a reference-style key is named, with the drafter that has it; an
+unknown one gets a "did you mean" and the valid keys: a typo must not silently change the cut rhythm). The file is built from
+timeline_example.py by replacing the blocks between its `# >>> draft:...` / `# <<< draft:...` markers (docstring, music block,
+cut block, sound block, segments). Few kills for a long edit give long lead-ins and long slow motion: the statistics it prints
+(against the house example with --compare) say so."""
+import argparse, bisect, collections, difflib, hashlib, json, math, os, re, sys
 import numpy as np
 import preflight                                  # a clear message when this is not the project's Python
 import clipio
@@ -85,6 +88,14 @@ ROT = [("whip", 0.7, (1, 0)), ("zoom", 0.6), ("whip", 0.7, (-1, 0)), ("spin", 0.
 MAXGAP = 16.0
 FRAME_EPS = 2          # frames of margin on the spacing rules: they are measured in beats on the musical times, a cut and a shot each round to
                        # a frame and a transition to an even number of frames, and verify() checks them on the SHOWN frames of the built module
+KEYS = {"music", "bpm", "beat0", "drop_beat", "cuts_on", "length", "length_tolerance", "lead_in", "final",
+        "cut_lead_frames", "hit_lead_frames", "kills"}                      # every key this drafter implements (plan.json)
+KILL_KEYS = {"clip", "K", "id", "level", "continuous", "lag", "end_card", "k_checked"}       # every key of a kill entry
+REF_ONLY = {"intro": "an intro", "auto_bullet": "an automatic bullet time where the drums thin out", "ref_notes": "a reference video's measured traits (ref_notes.json)",
+            "frame": 'a "frame" (vertical / horizontal)', "look": "a look preset", "max_speed": "a speed ceiling", "hit_grid": "a hit grid",
+            "bullet": "bullet time / a drop bullet", "with_previous": 'joining kills into one take ("continuous" in the house style)', "at": "pinning a kill on a beat"}
+# plan keys of the REFERENCE style (draft_ref_timeline.py): this style has no such feature, so they are refused instead of silently ignored (a typo
+# in a key the drafter reads would otherwise change the whole cut rhythm with no message)
 
 
 def die(errors, what="cannot draft this plan"):
@@ -111,6 +122,13 @@ def load_plan(path):
             E.append('plan.json has no "%s"' % key)
     if E:
         die(E)
+    for k in P:
+        if k in REF_ONLY:
+            E.append('"%s" is a reference-style feature the house style does not have (%s); draft_ref_timeline.py is the drafter that implements it '
+                     '(scripts/refstyle/). Drop it, or plan this edit in the reference style' % (k, REF_ONLY[k]))
+        elif k not in KEYS:
+            near = difflib.get_close_matches(k, sorted(KEYS), n=1, cutoff=0.6)
+            E.append('plan.json has an unknown key "%s"%s (valid: %s)' % (k, '; did you mean "%s"?' % near[0] if near else "", ", ".join(sorted(KEYS))))
     P.setdefault("cuts_on", "bass")
     P.setdefault("length_tolerance", 0.10)
     P.setdefault("lead_in", 4.2)
@@ -136,6 +154,14 @@ def load_plan(path):
     kills, db, unverified = [], preflight.kills_db(), []
     for i, k in enumerate(ks):
         tag = "kill #%d" % (i + 1)
+        for key in k:
+            if key in REF_ONLY:
+                E.append('%s: "%s" is a reference-style feature the house style does not have (%s); draft_ref_timeline.py is the drafter that implements '
+                         'it (scripts/refstyle/). Drop it, or plan this edit in the reference style' % (tag, key, REF_ONLY[key]))
+            elif key not in KILL_KEYS:
+                near = difflib.get_close_matches(key, sorted(KILL_KEYS), n=1, cutoff=0.6)
+                E.append('%s has an unknown key "%s"%s (valid per kill: %s)' % (tag, key, '; did you mean "%s"?' % near[0] if near else "",
+                                                                                ", ".join(sorted(KILL_KEYS))))
         if "id" in k:                                  # {"id": 96}: clip and K default to the kills.json entry
             e = db.get(str(k["id"]))
             if not e:
@@ -679,14 +705,19 @@ def print_stats(title, st):
 
 def verify(ns, rows, att, cuts_on):
     """Independent check of the finished module against the rules of edit-design.md, measured on its TimeMaps and on the SHOWN frames
-    (s["kills"], s["r0"]: exact frames; s["hits"], s["m0"]: the musical beats the sound sits on)."""
-    errs, warns = [], []
+    (s["kills"], s["r0"]: exact frames; s["hits"], s["m0"]: the musical beats the sound sits on). -> (errors, warnings, kills shown
+    twice): the last is a plan problem the caller refuses with its own message (not a bug in the build)."""
+    errs, warns, ov = [], [], []
     segs = ns["SEGS"]
     F, nf = ns["FPB"], ns["nearest_frame"]
     by = {r[0]: r for r in rows}
     tt = np.array(sorted(t for t, b, rs in att.all))          # every measured attack of the window: a kill / bass cut must sit on one
     t_of = lambda r: ns["BEAT0"] + (ns["M0"] + r) * ns["PER"]
     on_attack = lambda r: len(tt) and float(np.abs(tt - t_of(r)).min()) < 0.0006
+    first_no, no = {}, 0                                      # the plan's kill number of each segment's first kill (one take's kills are consecutive)
+    for j, s_ in enumerate(segs):
+        first_no[j] = no + 1 if s_["kills"] else None
+        no += len(s_["kills"])
     for i, s in enumerate(segs):
         if i and abs(s["r0"] - segs[i - 1]["r1"]) > 1e-9:
             errs.append("segment %d does not start where segment %d ends" % (i, i - 1))
@@ -724,7 +755,18 @@ def verify(ns, rows, att, cuts_on):
                 tl = att.bands.get(u, {}).get("low")
                 if tl is None or abs((tl - ns["BEAT0"]) / ns["PER"] - ns["M0"] - s["m0"]) > 1e-6 or u not in by or by[u][1] < 0.4:
                     errs.append("the transition into segment %d at beat %g is not on a kick's attack" % (i, s["m0"]))
-    return errs, warns
+            if prev["kills"] and s["kills"] and s["clip"] == prev["clip"]:      # one clip cut twice: the kill must not be a frame already shown
+                shown_to = float(prev["map"](prev["x1"])[0])                     # the last source frame the take before it shows (its run-out included)
+                kill_src = float(s["map"](s["kills"][0][0])[0])                 # the source frame of this take's first kill
+                if kill_src < shown_to + 1 - 1e-6:
+                    pno = first_no[i] - 1
+                    ov.append("kills #%d (%s K=%d) and #%d (%s K=%d) are two takes of one clip, but the first shows %s up to source frame %.1f and the "
+                                "second's kill is at frame %d: the picture would jump back inside the clip and show that kill twice. Mark kill #%d "
+                                "\"continuous\": true so both are one take (if their Ks and the speed ramp allow it), or use another kill whose source frames "
+                                "start after frame %.0f" % (
+                                    pno, prev["clip"], int(round(float(prev["map"](prev["kills"][-1][0])[0]))), first_no[i], s["clip"], int(round(kill_src)),
+                                    prev["clip"], shown_to, int(round(kill_src)), first_no[i], shown_to))
+    return errs, warns, ov
 
 
 # ------------------------------------------------------------------------------------------------ main
@@ -906,6 +948,7 @@ def main():
         "FPB = FPS * PER                     # output frames per beat (%.2f)\n"
         "R0, R1 = %s, %s                 # first / last beat of the video\n"
         "FADE_OUT = (%s, %s)             # picture and music fade to black over these beats\n"
+        "MAX_SPEED = None                    # no ceiling (the blur-ins fast-forward); 1.0 = nothing plays faster than real time. State it, do not omit it\n"
         'CUTS_ON = "%s"                    # where transitions land: "bass" (kicks / 808s only, the default) or "kills" (with the\n'
         "                                    # kill rhythm): the user's choice in the briefing; music_pulses.py checks it.\n") % (
         P["music"], bpm_txt, fnum(P["beat0"], 9), M0, P["drop_beat"], F, fnum(R0, 9, True), fnum(R1, 9, True),
@@ -965,7 +1008,9 @@ def main():
     src = replace_block(src, "segs", segs_txt + "# accents without a kill: (beat, weight): the strong kicks / snares that carry neither a kill nor a transition\n"
                         + "\n".join(lines) + "\n")
     ns = exec_timeline(src)
-    errs, warns = verify(ns, rows, att, P["cuts_on"])
+    errs, warns, ov = verify(ns, rows, att, P["cuts_on"])
+    if ov:
+        die(ov, "cannot place these kills without showing one twice")
     if errs:
         die(errs, "built a draft that fails its own check (a bug, or inputs it cannot handle)")
     open(args.out, "w", encoding="utf-8", newline="\n").write(src + SUM + hashlib.sha1(src.encode("utf-8")).hexdigest() + "\n")

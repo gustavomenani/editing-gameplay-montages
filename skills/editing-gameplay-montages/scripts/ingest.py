@@ -66,7 +66,10 @@ Output. src/ingest.json records per entry: original path and size, width, height
 copied | remuxed | exact | fast | audio), aspect policy, t0 (first video pts of the original), and for conversions the
 frame counts (picked / nearest / interpolated / held, rife calls, largest time error of a non-interpolated frame).
 Existing entries are kept (a warning when clips.json now names another file). --force re-ingests the selected entries;
---exact re-ingests the entries that were made with --fast. A re-ingested entry has the same frame grid but other
+--exact re-ingests the entries that were made with --fast; --convert re-ingests the ones that were linked / copied as they are.
+The manifest is read tolerantly (a truncated one is moved to src/ingest.json.bad and the run goes on: clips.json is the record of
+the originals) and written in one step (tmp + rename), so a kill or a full disk mid-write cannot lock every later run out.
+A re-ingested entry has the same frame grid but other
 pictures: delete store/<clip>, re-run prep.py and mkpts.py (the script says so). A run that loaded RIFE ends the way
 rifeutil.finish() does (no Vulkan unload crash). One bad entry (missing file, folder, unreadable) never stops the others;
 the exit code is 1 when any entry failed, so `ingest.py && mkpts.py` stops. Long conversions print a progress line
@@ -278,6 +281,41 @@ def drop(path):
             os.remove(path)
     except OSError:
         pass
+
+
+def read_manifest(path):
+    """src/ingest.json as {name: entry}; {} when it is absent. A truncated or unreadable one (a kill, or a full disk, in the middle of a dump
+    of an older run) is renamed to ingest.json.bad and the run goes on: the manifest is only a record (clips.json names the originals and
+    every entry is rebuilt from it), so a broken file must never stop ingest.py, and the old bytes are kept to look at."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = json.load(f)
+        if not isinstance(m, dict):
+            raise ValueError(f"its top level is a {type(m).__name__}, not an object of entries")
+        return m
+    except (OSError, ValueError) as e:
+        bad = path + ".bad"
+        try:
+            os.replace(path, bad)
+            where = f"moved to {bad}"
+        except OSError:
+            where = f"left in place (could not move it to {bad})"
+        say(f"{path}: WARNING cannot be read ({type(e).__name__}: {str(e)[:90]}): {where}, starting from an empty manifest "
+            "(every entry is rebuilt from clips.json; --force re-ingests what is already in src/)")
+        return {}
+
+
+def write_manifest(path, manifest):
+    """Write src/ingest.json in ONE step: tmp file, then os.replace. Dumping straight over the manifest left truncated JSON when the process
+    was killed (or the disk filled) mid-dump, and then every later ingest.py died on a JSONDecodeError."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())                          # on disk before the rename: a power cut cannot leave a half-written manifest either
+    os.replace(tmp, path)
 
 
 def convert(name, path, v, a, ts, mode, policy):
@@ -674,7 +712,7 @@ def main():
     for stale in glob.glob(os.path.join("src", "_*.part")):          # an interrupted run's half-written file
         drop(stale)
     mf_path = os.path.join("src", "ingest.json")
-    manifest = json.load(open(mf_path, encoding="utf-8")) if os.path.exists(mf_path) else {}
+    manifest = read_manifest(mf_path)
     global RIFE_CALLS
     rife_used = False
     redo, failed = [], []
@@ -683,7 +721,10 @@ def main():
         have = sorted(glob.glob(os.path.join("src", glob.escape(name) + ".*")))
         old = manifest.get(name)
         try:
-            if have and not args.force and not (args.exact and old and old.get("method") == "fast"):
+            # --exact re-ingests what was made with --fast; --convert re-ingests what was linked / copied as it is (its help says "convert
+            # ... instead of linking it": without this it printed "kept src/c1.mp4 (linked)" and the flag did nothing)
+            reconvert = args.convert and (old is None or old.get("method") in ("linked", "copied"))
+            if have and not args.force and not reconvert and not (args.exact and old and old.get("method") == "fast"):
                 note = ""
                 if old and old.get("original") and not same_path(old["original"], p):
                     note = f"  WARNING clips.json now names {p}, but this was made from {old['original']}: --force to redo it"
@@ -713,8 +754,8 @@ def main():
                 traceback.print_exc()
             failed.append(name)
         if name in manifest and not glob.glob(os.path.join("src", glob.escape(name) + ".*")):
-            del manifest[name]                                       # the failed re-ingest removed the old file: no stale record
-        json.dump(manifest, open(mf_path, "w", encoding="utf-8"), indent=1)
+            del manifest[name]                                   # the failed re-ingest removed the old file: no stale record
+        write_manifest(mf_path, manifest)
     for name in redo:
         todo = f"delete store/{name}, re-run mkpts.py {name} and prep.py" if os.path.isdir(os.path.join("store", name)) else f"re-run mkpts.py {name}"
         say(f"{name}: re-ingested (same frame grid, other pictures): {todo}")

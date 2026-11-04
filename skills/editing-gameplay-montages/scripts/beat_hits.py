@@ -11,7 +11,10 @@ each strength 0..1 (the old measure: strengths only, an onset within +-TOL of th
          hat the crack without the body, so neither counts as a snare; a band's snare, buried in guitars, still does
   high = anything bright arriving (above 2.5 kHz: snares, claps and every hat), the energy of that band against the 40 ms before
 `m` is the mono 44.1 kHz song from decode(). The window the strengths are normalised over is the video plus 3 s each
-side, like music_pulses.py, so the numbers are the same ones it prints for a timeline.py with the same music block.
+side, like music_pulses.py, so the numbers are the same ones it prints for a timeline.py with the same music block; inside that
+window a section's own onset level corrects the normalisation (onsets / _local_gain), so a part 10 dB quieter than the loudest
+still gives its kicks and snares the strength the absolute bars expect. A song of one level keeps the same hits, bands and times
+as before (only the strength values can move by up to a third, always up: they stay well clear of the bars in a loud song).
 raw=True returns the strengths unclipped (a loud, sharp hit is above 1: the clipped rows saturate on every kick of a dense groove).
 
 rows, att = measure_t(m, bpm, beat0, m0, r0, r1, raw=False, sub=2) -- the SYNC 2 measure: the same rows on the 1/sub beat lattice
@@ -41,6 +44,9 @@ LAG = 0.032                         # s: the flux of a frame peaks when the hit 
 TOL = 0.05                          # s: how far from the half beat an onset still counts
 KICK_FLOOR, KICK_SPAN = 0.6, 1.0    # low = (kick onset - KICK_FLOOR) / KICK_SPAN: 0.5 at an onset of 1.1 (a hit as strong as the strongest 1 % of the song's onsets)
 SNARE_SPAN, SNARE_KICK = 1.2, 0.3   # mid = (min(body, crack) - SNARE_KICK * kick onset) / SNARE_SPAN
+LOCAL_S = 4.0                       # s: the window a band's own onset level is read over (see _local_gain); a section is judged by itself
+LOCAL_PCT = 99                      # percentile of the onset curve in that window: the same one the whole-window normalisation uses
+LOCAL_GAIN_MAX = 4.0                # at most +12 dB of correction: a section 10 dB down gets its hits back, a near-silent tail cannot invent them
 
 
 def decode(path):
@@ -53,9 +59,33 @@ def decode(path):
     return m
 
 
+def _local_level(v):
+    """The band's own onset level around every frame: its LOCAL_PCT percentile over +-LOCAL_S/2, read on a grid of 0.25 s and smoothed
+    over 1 s (a section boundary is a slope, not a step). Digital silence gives 0 (the caller's gain is 1 then)."""
+    n = len(v)
+    h = max(1, int(round(LOCAL_S * FPS / 2)))
+    step = max(1, int(round(0.25 * FPS)))
+    c = np.arange(0, n, step)
+    ref = np.array([np.percentile(v[max(0, i - h):min(n, i + h)], LOCAL_PCT) for i in c])
+    k = max(1, int(round(FPS / step)))                  # 1 s of the grid
+    if k > 1 and len(ref) > 1:
+        ref = np.convolve(np.pad(ref, k // 2, mode="edge"), np.ones(k) / k, mode="valid")[:len(c)]
+        if len(ref) < len(c):                           # an even k leaves one sample more than there are centres
+            ref = np.pad(ref, (0, len(c) - len(ref)), mode="edge")
+    return np.interp(np.arange(n), c, ref)
+
+
+def _local_gain(loc, g):
+    """How much a section is below the level of the whole analysed window: 1 where the band's local onset level reaches the window's
+    (there the old, whole-window normalisation is kept exactly), up to LOCAL_GAIN_MAX where it is that many times quieter."""
+    return np.clip(g / np.maximum(loc, g / LOCAL_GAIN_MAX), 1.0, LOCAL_GAIN_MAX)
+
+
 def onsets(x):
     """x: mono float32. -> (kick, body, crack): the onset curve of 30..140 / 160..1500 / 1500..8000 Hz, one value per HOP samples, each the
-    positive log-spectral flux of that band minus its running median over 0.4 s, divided by its own 99th percentile (a strong hit is about 1 or more)"""
+    positive log-spectral flux of that band minus its running median over 0.4 s, divided by its own 99th percentile (a strong hit is about 1 or more).
+    The division is corrected for the level of the section (_local_gain): a section 10 dB quieter keeps its hits at the strength the absolute
+    bars of measure_t / LIST_MIN expect, while a song of one level keeps the same hits, bands and times"""
     win = np.hanning(N + 1)[:N].astype(np.float32)
     fr = sliding_window_view(x.astype(np.float32), N)[::HOP]
     f = np.fft.rfftfreq(N, 1 / SR)
@@ -64,14 +94,20 @@ def onsets(x):
     for i in range(0, len(fr), 1024):
         S[i:i + 1024] = np.abs(np.fft.rfft(fr[i:i + 1024] * win, axis=1))[:, :nb]
     f = f[:nb]
-    L = np.log1p(30.0 * S / np.percentile(S[:, f < 2000], 99.5))
+    sc = float(np.percentile(S[:, f < 2000], 99.5)) if len(fr) else 0.0
+    L = np.log1p(30.0 * S / max(sc, 1e-12))          # 1e-12: digital silence has no 99.5th percentile, and 0 / 0 would make every onset nan
     d = np.vstack([np.zeros((1, nb), np.float32), np.maximum(L[1:] - L[:-1], 0)])
     pad = int(FPS * 0.4) // 2
 
     def band(lo, hi):
-        v = d[:, (f >= lo) & (f < hi)].sum(1)
+        sel = (f >= lo) & (f < hi)
+        v = d[:, sel].sum(1)
         v = np.maximum(v - np.median(sliding_window_view(np.pad(v, pad, mode="edge"), 2 * pad + 1), axis=1), 0)
-        return v / (np.percentile(v, 99) + 1e-9)
+        # The flux of 10 dB quieter material is up to 3x smaller, so one p99 over the whole window let a quiet section's hits fall under
+        # the absolute strength bars (the same snare read mid 0.92 at 0.5 amplitude and 0.31 at 0.15): the drafters then found no hit there.
+        # The band's own onset level says how much quieter the section is; where it is as loud as the window the gain is 1 and nothing moves.
+        g = float(np.percentile(v, 99)) + 1e-9
+        return v / g * _local_gain(_local_level(v), g)
 
     return band(30, 140), band(160, 1500), band(1500, 8000)
 
@@ -103,7 +139,7 @@ def measure(m, bpm, beat0, m0, r0, r1, raw=False):
         after = eh[a_lo:a_hi].max()
         return float(after), float(after / (before + 1e-4))
 
-    ref_h = np.percentile(eh, 99)
+    ref_h = max(float(np.percentile(eh, 99)), 1e-12)                 # 1e-12: a silent take has no 99th percentile, and 0 / 0 would make sh nan
     rows = []
     for r in np.arange(np.ceil(r0 * 2) / 2, r1 + 0.01, 0.5):
         c = bt(r) - ta - LAG                                            # the frame whose window holds the hit
@@ -269,7 +305,7 @@ class _Win:
         g = (f / 2500.0) ** 4
         w = int(SR * 4 / 1000)
         self.eh = np.sqrt(np.convolve(np.fft.irfft(X * (g / np.sqrt(1 + g * g)), n=len(x)) ** 2, np.ones(w) / w, mode="same"))
-        self.ref_h = np.percentile(self.eh, 99)
+        self.ref_h = max(float(np.percentile(self.eh, 99)), 1e-12)   # 1e-12: digital silence would make s_hat 0 / 0 = nan
         self.kick, self.body, self.crack = onsets(x)
         self.ev = attacks(x, a0 / SR)
 
@@ -296,9 +332,13 @@ class _Win:
         return float(self.eh[a_lo:a_hi].max()), float(self.eh[a_lo:a_hi].max() / (self.eh[lo:hi].mean() + 1e-4))
 
     def s_hat(self, t):
-        """unclipped hat strength of a "high" attack at t; (strength, energy ratio part, energy part) for the clipped variant"""
+        """unclipped hat strength of a "high" attack at t; (strength, energy ratio part, energy part) for the clipped variant.
+        The ratio `after / (before + 1e-4)` is unbounded when the bright band was silent before the hit (a breakdown, a filtered
+        intro: rh reaches 1e3..1e4), and raw=True (music_hits.py writes hits.json with it, music_pulses.py reads it) used to publish
+        those numbers where the documented scale is 0..1.5. The cap of 2.0 only has to let the class pick see "clearly a hat": above it
+        min(1, st) already saturates, so the attack time chosen for the row does not change."""
         ah, rh = self.hat(t)
-        return (ah / self.ref_h) * max(0.0, (rh - 1.5) / 3.0), ah, rh
+        return min(2.0, (ah / self.ref_h) * max(0.0, (rh - 1.5) / 3.0)), ah, rh
 
 
 def _win(m, a0, a1):

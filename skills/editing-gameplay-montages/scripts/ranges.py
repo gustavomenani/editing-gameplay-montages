@@ -1,6 +1,9 @@
 """Which footage does the edit need? Derives ranges.json for prep.py from timeline.py:
 every source interval that is on screen, at 4 sub-frames per frame, and at 16 where it plays slower
 than 0.7x (in slow motion the 4x grid shows as a blend between two in-betweens).
+The reference style stops at the end of the luma fade: render.py paints the frame black from LUMA_FADE[1] on,
+so nothing is read there (the black tail used to be asked for, which wasted interpolation and reported an
+error whenever the last take runs past the end of its clip).
 
 usage: python ranges.py            -> ranges.json, then:  python prep.py ranges.json
                                                           python densify.py run 12 28
@@ -12,18 +15,22 @@ import preflight
 import numpy as np
 import clipio
 T = preflight.timeline(music=True)
-if "view" in T.SEGS[0] and getattr(T, "SYNC", 0) < 2:         # reference style: hard cuts on exact frames (the house style overlaps its transitions)
+REF = "view" in T.SEGS[0]                          # the reference style's S() has a `view`; the house style's has not
+if REF and getattr(T, "SYNC", 0) < 2:              # reference style: hard cuts on exact frames (the house style overlaps its transitions)
     sys.exit("ranges.py: timeline.py has no SYNC = 2 (it predates the frame-exact timing contract): copy the timing block of "
              "scripts/refstyle/timeline_ref_example.py into it, or redraft it with draft_ref_timeline.py.")
 
 SH = float(re.search(r"^SHUTTER = ([0-9.]+)", open("render.py", encoding="utf-8").read(), re.M).group(1))
 h = SH / T.FPB / 2
+LF = getattr(T, "LUMA_FADE", None) if REF else None   # the ending fade; render.py returns a black frame from its end on
 base, dense, bad = {}, {}, 0
 # the render reads, per output frame: the take(s) T.active() gives for that frame (reference style: the one take of T.take_of(n), chosen by
 # frame index; house style: both layers during an overlapping transition) over the shutter window [p(r - h), p(r + h)]; the reference
 # style's shot frame nk and the one before sample the exact position p(r) instead (render.py, crisp frames): a point inside that same window.
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
+    if LF is not None and r >= LF[1]:
+        continue                                   # black: nothing on screen, no footage asked for (render.py: r >= LUMA_FADE[1] -> black)
     a, b, p, tin = T.active(r)
     shown = [a] if b is None else [a, b]
     for i in shown:

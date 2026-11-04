@@ -14,6 +14,9 @@ Needs only timeline.py, clipio.py, ff.py, preflight.py, the clips in src/ and th
 runs the moment `python timeline.py` passes. What it is for: cut places, order, lengths, which kill is on which frame, words
 and sound, before the 15 to 60 minutes of prep.py. What it is NOT for: how the edit looks (zoom, shake, flash, colour, blur,
 slow-motion smoothness, the game sound and the risers are not in it). Output 540p H.264 + AAC, 60 fps, N_FRAMES frames.
+A source decode that ends early (a damaged or cut-off clip) is reported AT ONCE with the source frame it stops at and the
+frame that stands in for the rest of the range (the last frame stays on screen), and again in the closing summary; without
+that the preview showed a frozen take and said nothing until it had encoded everything.
 
 Timing: reference style = the render's own take rule (T.take_of(n), by frame index), the kill marks on the KILLS frames, a word's first letter on
 T.nearest_frame(start) - T.HIT_LEAD. The song is decoded from its first sample and cut at MUSIC_T0 by sample count (an input seek `-ss T -i` is 8 to 40 ms
@@ -95,6 +98,7 @@ class Reader:
 
     def __init__(self, clip, a, b):
         self.clip, self.a, self.b, self.idx, self.cur = clip, a, b, a - 1, None
+        self.short = False                             # the decoder ended before b (said at once, see get)
         self.err = tempfile.TemporaryFile()
         cmd = [FF, "-v", "error", "-nostdin"] + clipio.frame_args(clip, a, b, WIN_VF) + ["-frames:v", str(b - a + 1), "-f", "rawvideo", "-"]
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=self.err)
@@ -119,6 +123,11 @@ class Reader:
             f = self.q.get()
             if f is None:
                 self.q.put(None)                       # stays at the end for the next call
+                if not self.short:                     # say it NOW: the last frame stands in for the rest of the take
+                    self.short = True
+                    SHORT.append(f"{self.clip}: the decoder ended at source frame {self.idx}: frame {self.idx} is repeated instead "
+                                 f"of frame {i} to the end of the range {self.a}..{self.b} (a damaged or cut-off clip)")
+                    print("preview.py: warning:", SHORT[-1], file=sys.stderr, flush=True)
                 break
             self.cur, self.idx = f, self.idx + 1
         if self.cur is None:
@@ -133,7 +142,7 @@ class Reader:
         self.p.wait()
         self.p.stdout.close()
         self.err.close()
-        if self.idx < self.b:                           # the decoder ended early: the last frame stays on screen
+        if self.idx < self.b and not self.short:        # the decoder ended early: the last frame stays on screen
             SHORT.append(f"{self.clip}: frames {self.idx + 1}..{self.b} were not decoded")
 
 

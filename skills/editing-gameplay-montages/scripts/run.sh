@@ -23,6 +23,9 @@ export FF
 TL_SHA=$("$PY" -c "import hashlib; print(hashlib.sha1(open('timeline.py', 'rb').read()).hexdigest())" | tr -d '\r')   # stamped into the master: gate.py refuses a master rendered from another timeline.py
 
 N=$("$PY" -c "import preflight; print(preflight.timeline().N_FRAMES)" | tr -d '\r')
+# the pipeline's status is tr's, not Python's, and any extra stdout line would land in N: check the value itself before the arithmetic
+case "$N" in ''|*[!0-9]*) fail "could not read N_FRAMES from timeline.py (got '$N'): run  $PY preflight.py  to see what it reports";; esac
+[ "$N" -gt 0 ] || fail "N_FRAMES = $N in timeline.py: the video has no frame"
 A=$((N/3)); B=$((2*N/3))
 export CVT=${CVT:-4}                 # OpenCV threads per render process (three run at once)
 rm -f part_0.mp4 part_1.mp4 part_2.mp4 video.mp4 "$OUT.tmp.mp4"      # no part of an earlier or failed run can end up in this master (mix.wav stays: audio.py rewrites it, and deliver.sh of the previous master needs it)

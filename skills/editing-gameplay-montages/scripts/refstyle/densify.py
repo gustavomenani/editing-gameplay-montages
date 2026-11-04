@@ -1,11 +1,12 @@
 """Add more in-between frames where the picture moves fast, so motion blur is a smooth smear
-instead of a few stepped copies. Only source intervals that the edit shows at (near) real time or
-faster are considered; the faster the picture moves between two real frames, the denser the grid
-(8 or 16 sub-frames instead of 4). Existing files are kept.
+instead of a few stepped copies. Only source intervals that the edit shows at (near) real time are
+considered (0.75x up to 2.2x: faster footage is already a blur in the picture); the faster the
+picture moves between two real frames, the denser the grid (8 or 16 sub-frames instead of 4).
+Existing files are kept.
 
 usage: python densify.py plan 12 28     (only prints the plan)
        python densify.py run 12 28      (12 / 28 = output pixels of travel per frame that trigger 8x / 16x)"""
-import os, sys, glob, json
+import os, sys, glob, json, re
 import preflight
 import numpy as np
 import cv2
@@ -32,13 +33,14 @@ def path(clip, key):
 
 
 # 1) which source intervals does the edit show, and how fast
+SH = float(re.search(r"^SHUTTER = ([0-9.]+)", open("render.py", encoding="utf-8").read(), re.M).group(1))     # the render's shutter, read the way check_store.py does
 used = {}
-h = 0.5 / T.FPB / 2
 for n in range(T.N_FRAMES):
     r = T.frame_beat(n)
     for i in [T.take_of(n)]:                         # the take on screen, chosen by frame index (render.py)
         s = T.SEGS[i]
-        p0, p1 = float(s["map"](r - h)[0]), float(s["map"](r + h)[0])
+        hh = s.get("shutter", SH) / T.FPB / 2          # the window the renderer really integrates over (a take may set its own shutter)
+        p0, p1 = float(s["map"](r - hh)[0]), float(s["map"](r + hh)[0])
         v = float(s["map"](r)[1])
         for j in range(int(np.floor(p0)), int(np.floor(p1)) + 1):
             k = (s["clip"], j)

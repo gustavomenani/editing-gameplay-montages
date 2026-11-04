@@ -34,7 +34,7 @@ Prefer a late section (last chorus plus outro): it ends on a natural last word, 
 | the strongest snare of the section | a level-3 kill, a boom | levels |
 | the drums thin out (a bar with weak kick and snare) | a second bullet time: 2 to 3 beats of slow lead-in with a white flash-in and a riser into the next strong hit, a boom | the drafter finds it by itself (`auto_bullet`, on by default): 1.5 beats or more of drums under 35 % of a typical hit after a louder passage, then a strong hit within 2 beats; at most one per 30 s, never in the last two bars (the ace's). Your own `"bullet": "hit"` on a kill, or `"auto_bullet": false`, overrides it |
 | the last vocal line | the best multi-kill (the ace) kill by kill, one kill every 1.5 to 2.5 beats, all from the same clip | plan order |
-| the last sung word | the final kill (level 3 but calm: no zoom, punch or shake), then slow motion at about 0.08x under the fade | the last kill of the plan, pinned with `"at"` on the beat of the last sung word |
+| the last sung word | the final kill (level 3 but calm: no zoom, punch or shake), then slow motion at about 0.10x under the fade (0.12x when the timeline has no `MAX_SPEED` ceiling: the old fast-forward mode; the worked example's own last take is 0.12x) | the last kill of the plan, pinned with `"at"` on the beat of the last sung word |
 | strong hits that carry no kill | a light pulse and a 1.2 % nudge (a "bump") so the picture keeps moving with the drums | `BUMPS` (the drafter fills it from the measured hits) |
 
 Where the song has no such part, leave that part out; never invent a bullet time where the drums do not thin out.

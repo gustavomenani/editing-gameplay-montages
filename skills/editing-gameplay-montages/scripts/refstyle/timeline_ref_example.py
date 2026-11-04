@@ -24,9 +24,7 @@ FPB = FPS * PER                     # output frames per beat (27.69)
 R0, R1 = -16.0, 84.6                # first / last beat of the video (46.4 s)
 FADE_OUT = (82.0, 84.6)             # the music fades over these beats
 LUMA_FADE = (82.3, 83.2)            # the picture: dark areas go black first, highlights last (as in the reference)
-CUTS_ON = "bass"                    # where cuts land: "bass" (kicks / 808s only, the default) or "kills" (with the kill
-                                    # rhythm): the user's choice in the briefing; music_pulses.py checks it. The worked example's edit
-                                    # below was cut with the kills ("kills"): its cut beats do not pass "bass".
+CUTS_ON = "kills"                   # the example's measured rhythm is the kill rhythm: its cut beats do not pass "bass"; music_pulses.py checks it
 FRAME = "horizontal"                # "horizontal" (1920x1080, the gameplay fills the frame; the worked example) or "vertical" (1080x1920 for
                                     # TikTok / Reels / Shorts: the whole 16:9 gameplay in a window over a blurred backdrop, same cuts,
                                     # slow motion, words and luma fade). Optional: without it, horizontal. Nothing else in this file depends on it.

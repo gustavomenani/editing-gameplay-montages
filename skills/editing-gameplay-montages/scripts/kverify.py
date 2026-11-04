@@ -39,11 +39,12 @@ Exit code: 1 when any kill is suspect or CORRECTED (K changes), 0 otherwise (--s
 
 Output: kv_NN.jpg (6 kills per sheet; per kill 7 tiles K-3..K+3: the crosshair / weapon area with the ammo counter pasted in the corner;
 frame colour: green = ammo step, yellow = muzzle flash, cyan = both) and kv.json {"clip@K": {verdict, how, conf, K_sure, ammo, flash, ...}}.
---update (kills.json): K := the sure corrected K (the old one stays as "K_was"); for a verified / corrected kill whose feed row (when
-there is one) is 4..12 frames after K: how = "ammo" | "flash", conf = "high" (both signals) | "medium", verified = true; a K measured
-elsewhere than the shot of its feed row (a spray, or an earlier shot: kills.json c08#25 K=995 is a real shot, 27 frames before its row) keeps
-its old how (an entry without "how": "ammo-loose" / "guess" from its conf); a suspect verdict turns a verified how into "ammo-loose".
-"kverify": the verdict, always.
+--update (kills.json): K := the sure corrected K (the old one stays as "K_was"), but ONLY when its feed row still follows it inside the
+profile's lag.feed_frames (cs2 3..20, generic 3..30: see --game): a K the tool itself would not accept as the shot of that row is not
+written (the old K stays and a line says why). For a verified / corrected kill whose feed row (when there is one) is inside that window:
+how = "ammo" | "flash", conf = "high" (both signals) | "medium", verified = true; a K measured elsewhere than the shot of its feed row (a
+spray, or an earlier shot: kills.json c08#25 K=995 is a real shot, 27 frames before its row) keeps its old how (an entry without "how":
+"ammo-loose" / "guess" from its conf); a suspect verdict turns a verified how into "ammo-loose". "kverify": the verdict, always.
 
 The drafter refuses a kill whose kills.json entry has how "guess" or "ammo-loose" unless the plan entry says "k_checked": true
 (say so after reading these sheets)."""
@@ -63,7 +64,8 @@ FLASH_RATIO = 3.0    # ... and times the mean of the 4 frames before
 FLASH_PEAK = 1.5
 NEAR = 3             # a step this close to K (not on it) is a candidate for the corrected K
 HUD_GONE = 0.25      # white pixels of the HUD band after a frame / before it: below this the HUD went away (replay camera)
-FEED_LAG = (4, 12)   # frames from the shot to its feed row (valorant profile lag.feed_frames)
+FEED_LAG = (4, 12)   # frames from the shot to its feed row: FALLBACK only (Valorant's lag.feed_frames). main() passes the profile's
+                     # own window to apply_update (cs2 3..20, generic 3..30): a kill whose row arrives late was refused with how = guess
 
 
 def load_profile(game="valorant"):
@@ -272,21 +274,32 @@ def kills_from_json(path, ids, kills_json):
     return out
 
 
-def apply_update(kj, results):
-    """Write the verdicts into the kills.json dict (see the module docstring); -> number of entries touched."""
+def apply_update(kj, results, feed_lag=FEED_LAG):
+    """Write the verdicts into the kills.json dict (see the module docstring); -> number of entries touched.
+    feed_lag: (lo, hi) frames from the shot to its feed row, from the game profile's lag.feed_frames (main passes it; the
+    default is Valorant's window). A CORRECTED K is written only when the row still follows it inside that window: moving K
+    to a frame the tool itself would not accept as the shot of the row (the correction found another shot, or the row
+    belongs to a later shot) used to leave the entry with how = guess while its K pointed at a frame kverify rejects."""
     n = 0
-    for e in kj.values():
+    lo, hi = feed_lag
+    for i, e in kj.items():
         r = results.get("%s@%d" % (e["clip"], int(e["K"])))
         if r is None:
             continue
         if r["K_sure"] is not None:
-            e["K_was"], e["K"] = e["K"], r["K_sure"]
+            new = r["K_sure"]
+            lag = None if e.get("feed") is None else e["feed"] - new
+            if lag is None or lo <= lag <= hi:
+                e["K_was"], e["K"] = e["K"], new
+            else:                                                # the corrected frame would put the row outside the lag window: not the shot of that row
+                print("  kills.json #%s (%s): K kept at %d, not moved to %d: its feed row would sit %d frames after it, outside %d..%d"
+                      % (i, e["clip"], e["K"], new, lag, lo, hi))
         e["kverify"] = r["verdict"]
         lag = None if e.get("feed") is None else e["feed"] - e["K"]
         if "how" not in e:                                       # an entry of an older tool: its conf says what it was
             e["how"] = e.get("conf") if e.get("conf") in ("ammo-loose", "guess") else "guess"
             e["verified"] = False
-        if r["verdict"] in ("verified", "correct") and (lag is None or FEED_LAG[0] <= lag <= FEED_LAG[1]):
+        if r["verdict"] in ("verified", "correct") and (lag is None or lo <= lag <= hi):
             e["how"], e["conf"], e["verified"] = r["how"], r["conf"], True
         elif r["verdict"] == "suspect":                          # the signals do not support K: whatever claimed it is verified is wrong
             if e["how"] in ("ammo", "flash"):
@@ -367,9 +380,10 @@ def main():
         counts["verified"], counts["correct"], counts["suspect"], counts["unmeasurable"],
         "; sheets %s_01..%s_%02d.jpg" % (args.out, args.out, sheet) if sheet else "", args.out))
     if args.update:
-        n_up = apply_update(kj, results)
+        n_up = apply_update(kj, results, prof["lag"]["feed_frames"])
         json.dump(kj, open("kills.json", "w", encoding="utf-8"), indent=1)
-        print("kills.json updated: %d entries (K corrected where the verdict is CORRECT, K_was keeps the old one)" % n_up)
+        print("kills.json updated: %d entries (K corrected where the verdict is CORRECT and its feed row stays inside the profile's lag "
+              "window %d..%d; K_was keeps the old one, a line says where a correction was refused)" % ((n_up,) + tuple(prof["lag"]["feed_frames"])))
     sys.exit(1 if counts["suspect"] + counts["correct"] + (counts["unmeasurable"] if args.strict else 0) else 0)
 
 

@@ -5,14 +5,14 @@ screen, big enough to read, never covering the picture).
 usage: python text_test.py              -> text_test.jpg for the frame the timeline chooses (FRAME in timeline.py)
        python text_test.py vertical     -> the 1080x1920 sample (also before the timeline says FRAME = "vertical")
        python text_test.py horizontal   -> the 1920x1080 sample
-one row per style, then one row with the widest word of the timeline (to check that it stays within 70 % of the width);
-label = cue start beat and frames since the first letter (on T.nearest_frame(start) - T.HIT_LEAD; +HIT_LEAD = the frame the whole word is
+one row per style, then one row with the word whose INK is widest of the timeline (not the longest string: IIIIIIIII is narrower
+than MMMM), to check that it stays within 70 % of the width; label = cue start beat and frames since the first letter (on T.nearest_frame(start) - T.HIT_LEAD; +HIT_LEAD = the frame the whole word is
 legible on, checked and printed per row). Vertical: the background has the gameplay window (the lighter band
 across the middle, where the words sit).
 Printed per row, measured on the rendered letters of the third tile (the ink, not the glow): capital height in px and as a
 share of the frame height (vertical: also of the window height), ink width as a share of the frame width (vertical: of the
 window width, the same), and the offset of the ink's bounding box centre from the frame centre (accents and descenders
-excepted, the capitals are what is centred): at most 2 px."""
+excepted, the capitals are what is centred): checked against the documented 2 px and printed as ok / FAIL."""
 import sys
 import frame
 for _a in sys.argv[1:]:
@@ -68,11 +68,22 @@ def report(j, label):
     line = "%-8s %-18s cap %3d px = %4.1f %% of H" % (label, cue.word[:18], round(cap), 100.0 * cap / H)
     if frame.VERT:
         line += " = %4.1f %% of the window" % (100.0 * cap / frame.WIN_H)
-    line += " | ink %4d px = %4.1f %% of W | centre dx %+.1f dy %+.1f" % (x1 - x0 + 1, 100.0 * (x1 - x0 + 1) / W, (x0 + x1 + 1) / 2.0 - W / 2.0, (y0 + y1 + 1) / 2.0 - H / 2.0)
+    dx, dy = (x0 + x1 + 1) / 2.0 - W / 2.0, (y0 + y1 + 1) / 2.0 - H / 2.0
+    centre_ok = abs(dx) <= 2.0 and abs(dy) <= 2.0                     # the documented rule: the ink's centre within 2 px of the frame's
+    line += " | ink %4d px = %4.1f %% of W | centre dx %+.1f dy %+.1f %s" % (x1 - x0 + 1, 100.0 * (x1 - x0 + 1) / W, dx, dy,
+                                                                            "ok (<= 2 px)" if centre_ok else "FAIL (over the 2 px rule)")
     first, last = min(cue.appear.values()), max(cue.appear.values())
     ok = first == T.nearest_frame(cue.a) - T.HIT_LEAD and last <= T.nearest_frame(cue.a)
     line += " | letters on frames %+d..%+d from the onset frame %s" % (first - T.nearest_frame(cue.a), last - T.nearest_frame(cue.a), "ok" if ok else "WRONG")
     print(line)
+
+
+def ink_width(j):
+    """Real ink width (px) of cue j: the letters as they are drawn, not the character count (an I is a third of an M). Builds the cue,
+    measures its settled mask and frees it again, so a whole lyrics file can be measured without holding every word in memory."""
+    x0, x1, _y0, _y1, cue = measure(j)
+    cue.tiles, cue.settled, cue.built = {}, None, False
+    return x1 - x0 + 1
 
 
 if not T.TEXT:
@@ -85,7 +96,7 @@ for j, (a, b, w, st) in enumerate(T.TEXT):
     last = max(1, int((b - a) * T.FPB) - 2)             # stay inside the cue
     rows.append([fr(a, 1), fr(a, min(4, last)), fr(a, min(20, last))])
     report(j, st)
-j = max(range(len(T.TEXT)), key=lambda q: len(T.TEXT[q][2]))
+j = max(range(len(T.TEXT)), key=ink_width)                          # the real ink width, not len(word): what must fit in 70 % of W
 a, b, w, st = T.TEXT[j]
 last = max(1, int((b - a) * T.FPB) - 2)
 rows.append([fr(a, 1), fr(a, min(4, last)), fr(a, min(20, last))])

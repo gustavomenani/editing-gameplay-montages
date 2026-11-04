@@ -6,7 +6,9 @@ usage (from the project folder, with the project's Python):
                                                  deliver.sh passes it); each waived code is written to LEIAME.md with the date and the problem, so nothing
                                                  is waived silently. An unknown code is refused (a typo must not waive anything).
     python gate.py master.mp4 --json             the list as JSON on stdout (nothing else is printed)
-    python gate.py master.mp4 --no-pixels        skip the checks that decode the master and the clips (timeline, file, sound and audio report only)
+    python gate.py master.mp4 --no-pixels        skip every check that decodes pictures (the master's frames, the clips): picture, kill sync and
+                                                 kverify are left out; the timeline, file, audio report, kills, lyrics and the sound / song / grid
+                                                 parts of the sync audit still run, and the picture events it cannot measure are WARNed, not dropped
     python gate.py master.mp4 --deep             also render about 10 frames again with render.py (the part joins, some cuts) and compare them with the master (1-2 minutes)
     python gate.py master.mp4 --table            also print the sync audit's table (per event: expected frame / measured frame / ms)
     python gate.py --sync-only VIDEO             ONLY the sync audit of one file, which may be the UPLOAD COPY without the master next to it (deliver.sh runs it on the file that leaves,
@@ -23,14 +25,17 @@ What it checks
   timeline     SYNC = 2 (an older timeline.py is refused: ERROR timeline-old, never waived, the message says how to update), then preflight.check (clips, anchors, music, FADE_OUT ...) and
                preflight.fast_forward (MAX_SPEED: runs of frames faster than real time; backwards)
   the file     exists, video stream, size of the frame (1080x1920 / 1920x1080), 60 fps, frame count and duration of the timeline, audio stream at 48 kHz,
-               audio as long as the picture; a master older than timeline.py (WARN)
+               audio as long as the picture, the START of the two tracks (pts-gap: the picture must begin at 0 and with the sound); a master older than timeline.py (WARN here,
+               a refusal in deliver.sh: the upload copy would be audited against the new timeline after the whole encode)
   picture      check.py's measures on the master: frames identical to the previous one outside fades (ERROR), one-frame stalls (ERROR; the one frame
                before a cut out of an intro shot is the known false positive and is not counted), one-frame jumps that no kill, cut, accent or transition
-               explains (ERROR), and, in the reference style, for every kill whether the master shows the source frame the timeline asks for around the beat
-  sound        decoded peak above -0.5 dBFS (ERROR: peakguard.py should have fixed it), loudness outside -14 .. -7 LUFS (WARN)
+               explains (ERROR), and, in the reference style, for every kill whether the master shows the source frame the timeline asks for around the beat.
+               A stall / jump becomes the gameplay WARN only when the master's OWN frame is the one the timeline asks for and, for a stall, when the
+               timeline's map itself repeats the source position there (the footage is frozen): a mean over five frames could hide a duplicated frame
+  sound        decoded peak above 0 dBFS (ERROR: clipped; peakguard.py keeps the delivered copy below -0.5), loudness outside -14 .. -7 LUFS (WARN)
   audio.py     audio_report.json: made for this timeline.py (else ERROR audio-stale: deliver.sh encodes mix.wav), every kill has a gunshot unless mute=True
                (ERROR in the reference style), mix.wav not clipped and as long as the picture, gunshots placed with an offset that was not measured (WARN)
-  kills        kill_rank.check_timeline: hidden, not the player's, duplicated footage, K not the killing shot (ERROR); no kills.json: WARN; kverify.py: K re-measured on the pictures
+  kills        kill_rank.check_timeline: hidden, not the player's, duplicated footage, K not the killing shot or 2-12 frames after its feed row (ERROR); no kills.json: WARN; kverify.py: K re-measured on the pictures
                (ammo step / muzzle flash on K, none on K-1): a corrected or suspect K is ERROR kill-frame, not measurable WARN (not in --sync-only: it needs src/ and pts/)
   lyrics       with lyrics.txt and lyric_cues.json: a word on screen that is not in the lyrics (ERROR)
   sync audit   syncaudit.py, independent of the render's and the mixer's own bookkeeping (read its docstring): the file's pts lattice (pts-gap), the sound against the SONG (av-offset > 1 ms, av-drift),
@@ -48,8 +53,8 @@ CODES = {
     "fast-forward": ("ERROR", "frames play faster than MAX_SPEED"),
     "backwards": ("ERROR", "the footage plays backwards (a pinned speed no anchor allows)"),
     "max-speed": ("ERROR", "MAX_SPEED is not a number"),
-    "no-ceiling": ("ERROR", "no MAX_SPEED and frames play above 1.25x: waive (ACCEPT=no-ceiling) only for a user who asked for velocity"),
-    "master-older": ("WARN", "timeline.py was changed after the master was rendered"),
+    "no-ceiling": ("ERROR", "timeline.py never wrote MAX_SPEED and frames play above 1.25x: waive (ACCEPT=no-ceiling) only for a user who asked for velocity; an explicit MAX_SPEED = None is a WARN"),
+    "master-older": ("WARN", "timeline.py was changed after the master was rendered (deliver.sh refuses such a master before it encodes)"),
     "no-master": ("ERROR", "the master file does not exist"),
     "bad-video": ("ERROR", "the master has no readable video stream"),
     "size": ("ERROR", "frame size does not match FRAME / the style"),
@@ -69,8 +74,8 @@ CODES = {
     "gameplay-jump": ("WARN", "a one-frame jump / pause the master reproduces from the footage itself (a shot that did not kill, an ability)"),
     "kill-sync": ("ERROR", "the master shows a source frame 2 or more frames off the timeline at a kill"),
     "kill-sync-late": ("WARN", "the master shows a source frame 1 off the timeline at a kill (more than the table predicts)"),
-    "sync-unmeasured": ("WARN", "the kill sync could not be measured for most kills"),
-    "peak": ("ERROR", "the decoded audio peak is above -0.5 dBFS (clipping risk)"),
+    "sync-unmeasured": ("WARN", "the kill sync could not be measured for some kills (a flat picture, an unreadable frame or clip): listed, never a pass"),
+    "peak": ("ERROR", "the decoded audio peak is above 0 dBFS (clipped; peakguard.py keeps the delivered copy below -0.5)"),
     "loudness": ("WARN", "integrated loudness outside -14 .. -7 LUFS"),
     "audio-unmeasurable": ("ERROR", "ffmpeg could not measure the master's loudness / peak"),
     "audio-unverified": ("WARN", "no audio_report.json: audio.py was not run with this version"),
@@ -83,6 +88,7 @@ CODES = {
     "not-yours": ("ERROR", "the kill feed row is not the player's (kill_rank.py)"),
     "duplicate": ("ERROR", "the same footage twice (kill_rank.py)"),
     "wrong-shot": ("ERROR", "K is not the killing shot (kill_rank.py)"),
+    "k-after-row": ("ERROR", "K lies 2-12 frames after the feed row of a kill of that clip (the row follows the killing shot, never precedes it)"),
     "unverified": ("WARN", "no kill row follows K (kill_rank.py)"),
     "weak-shot": ("WARN", "K comes from a kill without a shot signal (kill_rank.py)"),
     "no-kills": ("WARN", "no kills.json: kills not verified (kill_rank.py)"),
@@ -91,7 +97,7 @@ CODES = {
     "lyrics-word": ("ERROR", "a word on screen is not in lyrics.txt"),
     # the sync audit (syncaudit.py): the finished file against the timeline and the REAL song. NOT waivable: timeline-old, av-offset, av-drift, frame-count, cut-frame, pts-gap
     "timeline-old": ("ERROR", "timeline.py has no SYNC = 2: it is from the old pipeline (ceil cuts, beat-domain accents); update the project, never waived"),
-    "pts-gap": ("ERROR", "the video's timestamps leave the 1/60 s lattice (WARN below 1 ms, ERROR above: a bad part join, a dropped or repeated frame), never waived"),
+    "pts-gap": ("ERROR", "the video's timestamps leave the 1/60 s lattice (WARN below 1 ms, ERROR above: a bad part join, a dropped or repeated frame) or the picture does not start at 0 with its sound (an -itsoffset, an elst / edit list, a mux offset), never waived"),
     "av-offset": ("ERROR", "the sound sits more than 1 ms from the song at the timeline's place (WARN above 0.25 ms), never waived"),
     "av-drift": ("ERROR", "the sound's offset to the song moves by more than 1 ms inside the video (the audio runs at another tempo), never waived"),
     "audio-unmatched": ("ERROR", "the decoded audio does not contain the song section the timeline says"),
@@ -138,8 +144,10 @@ def check_timeline(T):
         out.append(item("ERROR", "timeline", "timeline.py", p, "fix timeline.py as the message says, then python timeline.py"))
     for d in preflight.fast_forward(T):
         # preflight only warns (the worked example must still load), but a delivery with unrequested fast-forward is
-        # the error the user complained about ("clips acelerados do nada"): the gate refuses it unless waived by code
-        sev = "ERROR" if d["code"] == "no-ceiling" else d["severity"]
+        # the error the user complained about ("clips acelerados do nada"): the gate refuses it unless waived by code.
+        # A timeline that never wrote MAX_SPEED omitted its choice; an explicit MAX_SPEED = None ("no ceiling", documented as
+        # only on a velocity request) is a decision, so it keeps preflight's WARN.
+        sev = "ERROR" if d["code"] == "no-ceiling" and not d.get("explicit") else d["severity"]
         out.append(item(sev, d["code"], d["where"], d["msg"], d["fix"]))
     return out
 
@@ -160,6 +168,14 @@ def expected_size(T):
         return frame.W, frame.H
     except ImportError:
         return 1080, 1920
+
+
+def _start_time(stream):
+    """The stream's start_time in seconds (ffprobe), or None when it has none ("N/A" in some matroska files): not measurable."""
+    try:
+        return float(stream.get("start_time"))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def check_file(T, video):
@@ -215,11 +231,32 @@ def check_file(T, video):
             da = float(a0.get("duration") or 0)
         except ValueError:
             da = 0.0
-        if da and da < dv - 0.25:
+        # one frame of tolerance: a silent tail of 0.2 s (12 frames) used to pass without an item, a whole AAC padding frame is 21 ms
+        if da and da < dv - 1.0 / T.FPS - 0.001:
             out.append(item("ERROR", "audio-short", video, "the audio ends %.2f s before the picture (%.2f s against %.2f s)" % (dv - da, da, dv),
                             "audio.py must cover the video: python preflight.py, then run.sh again"))
         elif da and da > dv + 0.25:
             out.append(item("WARN", "audio-long", video, "the audio runs %.2f s past the picture" % (da - dv), "the player cuts it; run.sh again if it matters"))
+    # WHERE the tracks start, not only how long they are: an -itsoffset, an elst / edit list or a mux offset leaves a video that is
+    # 0.5 s late with the right size, frame count, fps and sound, so every check above passes while the whole edit plays over the
+    # wrong part of the song. The picture starts at 0 (half a tick of its time base is rounding) and the sound starts with it
+    # (within a frame; a longer start difference is a late or early track, whatever moved it).
+    try:
+        tn, td = (int(x) for x in (v.get("time_base") or "1/15360").split("/"))
+        tick = tn / float(td)
+    except (ValueError, ZeroDivisionError):
+        tick = 1.0 / 15360.0
+    sv = _start_time(v)
+    sa = _start_time(au[0]) if au else None
+    late = []
+    if sv is not None and abs(sv) > 0.5 * tick:
+        late.append("the picture starts at %.6f s, not at 0" % sv)
+    if sv is not None and sa is not None and abs(sv - sa) > 1.0 / T.FPS:
+        late.append("the sound starts at %.6f s, %.1f ms away from the picture (more than a frame)" % (sa, abs(sv - sa) * 1000.0))
+    if late:
+        out.append(item("ERROR", "pts-gap", video, "; ".join(late) + ": every picture event sits that far from its sound",
+                        "re-mux the master from 0: run.sh's last ffmpeg line (ffmpeg -i video.mp4 -i mix.wav -map 0:v -map 1:a ...) with no "
+                        "-itsoffset, no -avoid_negative_ts and no elst edit list on the picture"))
     tag = " ".join(str(x) for x in (p.get("format", {}).get("tags") or {}).values())
     m = re.search(r"timeline_sha1=([0-9a-f]{40})", tag)
     if m and os.path.isfile("timeline.py"):
@@ -229,6 +266,19 @@ def check_file(T, video):
     elif os.path.isfile("timeline.py") and os.path.getmtime("timeline.py") > os.path.getmtime(video) + 2:
         out.append(item("WARN", "master-older", video, "timeline.py was changed after %s was rendered (the master carries no timeline stamp)" % video, "if the change touched the picture or the sound, bash run.sh again"))
     return out, usable
+
+
+def footage_frozen(T, n):
+    """Does the timeline's own map ask for the same source frame at n and n-1? Only then is an output frame that repeats the one before it
+    the footage's own pause (a real hold of the aim, an anchor pair that repeats a source frame) and not a frame the render duplicated.
+    One take only: across a cut the two frames are different footage, so a repeat there is always the render's."""
+    try:
+        if n < 1 or T.take_of(n) != T.take_of(n - 1):
+            return False
+        s = T.SEGS[T.take_of(n)]
+        return abs(float(s["map"](T.frame_beat(n))[0]) - float(s["map"](T.frame_beat(n - 1))[0])) < 1e-6
+    except Exception:
+        return False                                      # not measurable: never a pass
 
 
 def check_picture(T, video, pixels_log):
@@ -263,12 +313,19 @@ def check_picture(T, video, pixels_log):
             fa = check.faithful(video, cand, T) or {}              # the house check cannot (returns None): then they stay errors
         except Exception as e:
             out.append(item("ERROR", "check-failed", "jump / stall", "the faithfulness measure crashed: %s: %s" % (type(e).__name__, e), "tell the maintainer; do not deliver on a doubt"))
-    gameplay = [n for n in cand if fa.get(n, {}).get("ok")]
+    ok = {n for n in cand if fa.get(n, {}).get("ok")}
+    acc = set(getattr(check, "accent_frames", tuple)())    # an older check.py has none: then only the map rule below explains a stall
+    # the footage explains a flagged frame only when that frame ITSELF is what the timeline asks for (a mean over four good neighbours
+    # used to hide one bad frame, and a stutter passed as gameplay), and a stall (an output frame that repeats the one before it) only
+    # when the timeline's own map repeats the source position there: otherwise the render duplicated a frame the timeline moves past.
+    # An accent frame (the reference style's inverted impact frame) is deliberately not the source picture, and stays allowed.
+    gameplay = [n for n, _, _ in real if n in ok and (n in acc or footage_frozen(T, n))]
+    gameplay += [n for n, _, _ in res["odd"] if n in ok and n not in gameplay]
     real = [(n, v, nb) for n, v, nb in real if n not in gameplay]
     odd = [(n, v, nb) for n, v, nb in res["odd"] if n not in gameplay]
     if real:
         out.append(item("ERROR", "stall", "output frames " + _frames_text([n for n, _, _ in real]),
-                        "the motion stops for one frame (%s) and the master does not show the footage the timeline asks for there" % "; ".join(
+                        "the motion stops for one frame (%s) and the master does not show the footage the timeline asks for there, or the timeline's map moves past that source position (the render repeated a frame)" % "; ".join(
                             "frame %d: %.2f against %.2f around it" % (n, v, nb) for n, v, nb in real[:4]),
                         "look at the source: python cadence.py <clip> <frame-8> <frame+8> --detail; a duplicated source frame: python repair.py; a store gap: python check_store.py"))
     if odd:
@@ -277,14 +334,14 @@ def check_picture(T, video, pixels_log):
                         "python peek.py shows what they are; a store gap or a wrong frame: python check_store.py, python posmap.py, then render again"))
     if gameplay:
         out.append(item("WARN", "gameplay-jump", "output frames " + _frames_text(gameplay),
-                        "%d one-frame jump / pause(s) the master reproduces from the footage (the timeline asks for exactly these frames): a shot that did not kill, an ability, a pause of the aim" % len(gameplay),
+                        "%d one-frame jump / pause(s) the master reproduces from the footage (the timeline asks for exactly these frames, or for the accent on them): a shot that did not kill, an ability, a pause of the aim" % len(gameplay),
                         "python peek.py shows what they are; cut them out of the take if they distract"))
     s = res["sound"]
     if res["audio_stream"] and s is None:
         out.append(item("ERROR", "audio-unmeasurable", video, "ffmpeg could not measure the loudness / peak of the master's audio", "ffmpeg -i %s -vn -af ebur128=peak=true -f null -" % video))
     if s:
-        if s["peak"] > -0.5:
-            out.append(item("ERROR", "peak", video, "decoded peak %+.2f dBFS, above -0.5 (clips on some players)" % s["peak"],
+        if s["peak"] > 0.0:
+            out.append(item("ERROR", "peak", video, "decoded peak %+.2f dBFS, above 0 (clips on some players)" % s["peak"],
                             "python peakguard.py %s <volume> mix.wav (house style 2.36; reference style: chain) (run.sh and deliver.sh call it); lower the game / effect levels in audio.py if it stays" % video))
         if not -14.0 <= s["lufs"] <= -7.0:
             out.append(item("WARN", "loudness", video, "integrated loudness %.1f LUFS, outside -14 .. -7" % s["lufs"],
@@ -302,6 +359,7 @@ def check_alignment(T, video):
         return []
     out = []
     meas = [a for a in al if a.get("measurable", True)]
+    unm = [a for a in al if not a.get("measurable", True)]
     other = [a for a in meas if a["score"] < 0.35]
     best = {id(a): max(a["scores"], key=a["scores"].get) for a in meas}
     bad = [a for a in meas if a["score"] >= 0.35 and abs(best[id(a)]) >= 2 and a["scores"][best[id(a)]] - a["scores"].get(0, 0) >= 0.03]
@@ -319,9 +377,13 @@ def check_alignment(T, video):
         out.append(item("WARN", "kill-sync-late", "beats " + ", ".join("%g" % a["beat"] for a in late[:8]),
                         "the picture's source sits one frame off the timeline at %d kill(s) (this band correlation cannot always tell one frame; the sync audit's flash / cut-frame lines are the exact test)" % len(late),
                         "python check.py %s and look at sync_N.jpg for these kills" % video))
-    if al and len(meas) < len(al) / 2:
-        out.append(item("WARN", "sync-unmeasured", "kill sync", "%d of %d kills sit on a flat picture (black / one colour): nothing to match" % (len(al) - len(meas), len(al)),
-                        "look at sync_N.jpg for the kills (python check.py %s)" % video))
+    if unm:
+        # an event that cannot be measured is listed, never counted as a pass: check.py returns a not-measurable entry for every kill
+        # it could not read (a flat / black picture, the master ending early, a missing clip), so a project where several or all kills
+        # cannot be read still says so here instead of looking clean
+        out.append(item("WARN", "sync-unmeasured", "beats " + ", ".join("%g (%s)" % (a["beat"], a["clip"]) for a in unm[:8]) + (" ..." if len(unm) > 8 else ""),
+                        "%d of %d kill(s) could not be measured (a flat / black picture, or the master's frames / the clip could not be read): their sync is NOT verified" % (len(unm), len(al)),
+                        "look at sync_N.jpg for these kills (python check.py %s); a store gap or a wrong frame: python check_store.py" % video))
     return out
 
 
@@ -547,6 +609,13 @@ def run(video, accept=(), pixels=True, log=None, table=None, deep=False):
         items += pl
         if r is not None and r.get("frames") == T.N_FRAMES:
             items += part("kill sync", check_alignment, T, video)
+        elif r is not None:
+            # check.py's own warning about the frame count goes to its log (discarded unless --json): the kill sync that could not be run
+            # must still be an item, never a silent skip
+            items.append(item("WARN", "sync-unmeasured", "kill sync",
+                              "the kill sync was not measured: %s decodes to %s frames, timeline.py has %d (check.py's warning is in its report)"
+                              % (video, r.get("frames"), T.N_FRAMES),
+                              "render the master again: bash run.sh %s (a container whose frame count disagrees is an ERROR above)" % video))
     elif pixels and not usable:
         items.append(item("WARN", "picture-unchecked", "picture", "the picture checks (frozen frames, stalls, kill sync, sound) were not run: the file above is unusable", "fix the file first"))
     items += part("audio", check_audio_report, T)
@@ -570,15 +639,24 @@ def waive(items, accept):
 
 
 def note_accepted(items, video):
-    """Append the waived problems to LEIAME.md (created when the project has none): nothing is waived silently."""
+    """Append the waived problems to LEIAME.md (created when the project has none): nothing is waived silently. Idempotent: a waiver
+    line already in the file (same code, place and message) is not written again, so running the gate or deliver.sh twice on the same
+    file does not duplicate the record."""
     acc = [i for i in items if i["severity"] == "ACCEPTED"]
     if not acc:
         return
+    try:
+        with open("LEIAME.md", encoding="utf-8") as f:
+            have = set(f.read().splitlines())
+    except OSError:
+        have = set()                                      # no LEIAME.md yet: everything is new
+    bullets = ["- `%s` em %s: %s" % (i["code"], i["where"], i["msg"]) for i in acc]
+    new = [b for b in bullets if b not in have]
+    if not new:
+        return
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = ["", "## Aceito na entrega de %s (%s)" % (video, now), "",
-             "O gate de entrega (gate.py) achou estes problemas e o usuário pediu para entregar assim mesmo (`--accept`):", ""]
-    for i in acc:
-        lines.append("- `%s` em %s: %s" % (i["code"], i["where"], i["msg"]))
+             "O gate de entrega (gate.py) achou estes problemas e o usuário pediu para entregar assim mesmo (`--accept`):", ""] + new
     with open("LEIAME.md", "a", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -588,7 +666,7 @@ def main(argv=None):
     ap.add_argument("video", nargs="?")
     ap.add_argument("--accept", default="", help="comma-separated codes whose ERRORs are waived (also: ACCEPT in the environment)")
     ap.add_argument("--json", action="store_true", help="print the list as JSON and nothing else")
-    ap.add_argument("--no-pixels", action="store_true", help="skip the checks that decode the master and the clips")
+    ap.add_argument("--no-pixels", action="store_true", help="skip every check that decodes pictures (picture, kill sync, kverify); timeline, file, sound, audio report, kills and lyrics still run")
     ap.add_argument("--codes", action="store_true", help="list every code")
     ap.add_argument("--sync-only", action="store_true", help="only the sync audit of this ONE file (container, sound against the song, cut / shot / flash / accent frames, words): the upload copy, no master needed")
     ap.add_argument("--deep", action="store_true", help="also render about 10 frames again with render.py (part joins, some cuts) and compare them with the file (1-2 minutes more)")
@@ -611,6 +689,9 @@ def main(argv=None):
         return 2
     t0 = time.time()
     log, table = io.StringIO(), io.StringIO()
+    if a.sync_only and not os.path.isfile(a.video):
+        print("gate.py: %s does not exist: --sync-only audits one named file, so a missing path is a bad call (exit 2), not a finding" % a.video, file=sys.stderr)
+        return 2
     if a.sync_only:
         items = run_sync_only(a.video, table, a.deep)
         waive(items, accept)

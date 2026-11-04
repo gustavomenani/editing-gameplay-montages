@@ -13,6 +13,7 @@
   },
   "weapon": {"region": [840, 400, 1080, 600]},
   "ammo": null,
+  "review": {"action": [576, 324, 768, 432], "feed": [1320, 60, 600, 420]},
   "lag": {"feed_frames": [3, 30], "likely": [6, 16], "typical": 10, "audio_frames": [-1, 6], "audio_typical": 2.0},
-  "notes": "Untuned fallback for any shooter: kill feed assumed at the top right, no own-kill rule (every feed row is reported, the review sheets decide which are yours), no ammo counter, weapon at the lower right. Run kills_auto.py --regions <clip> <frame> to check the regions, then copy this file to games/<game>.json and tune it."
+  "notes": "Untuned fallback for any shooter: kill feed assumed at the top right, no own-kill rule (every feed row is reported, the review sheets decide which are yours), no ammo counter, weapon at the lower right. Run kills_auto.py --regions <clip> <frame> to check the regions, then copy this file to games/<game>.json and tune it. review = the crop rectangles of kill_rank.py's contact sheet: review.feed is this profile's whole feed region (with Valorant's rectangle the sheet showed a corner of the map instead of the feed), review.action the centred gameplay tile around the crosshair."
 }

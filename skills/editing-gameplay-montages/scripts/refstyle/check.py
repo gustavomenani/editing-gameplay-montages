@@ -28,9 +28,11 @@ House-style reference values:  identical   stalled   judder index   decoded peak
 
 For gate.py (the delivery gate): `import check` has no side effects; `analyze(video, T)` prints the report above and returns the measurements
 (dict: frames, expected, exact, stalls, jumps, odd, judder, sync, sound, audio_stream, exit); `alignment(video, T)` measures, for every kill,
-which source frame the master's picture shows around the beat against the one the timeline asks for (-> list of dicts, nothing printed);
-`faithful(video, frames, T)` does the same around any output frames, to tell a jump or pause that is in the footage (the master matches the
-timeline: a shot that did not kill, an ability, a real pause) from one the render made."""
+which source frame the master's picture shows around the beat against the one the timeline asks for (-> list of dicts, nothing printed;
+every kill is in it, a kill whose frames could not be read with measurable False), `faithful(video, frames, T)` does the same for any output
+frame, to tell a jump or pause that is in the footage (the master's OWN frame is the source frame the timeline asks for: a shot that did
+not kill, an ability, a real pause) from one the render made, and `accent_frames()` names the frames the timeline deliberately shows instead
+of the source picture (the inverted level-3 impact frame)."""
 import re, subprocess, sys, os, json
 import preflight
 import numpy as np
@@ -271,8 +273,9 @@ def analyze(VID, T_=None, sheets=False, strips=True):
 def _match(VID, cases, workers=6):
     """Compare the master with the clips. cases: [(key, segment index, n0, [j, ...])]. The master's frames n0+j are compared, in the two motion
     bands above and below the words (normalised correlation of 80x24 gray bands), with the clip's frames p_j + delta, p_j = the source frame the
-    timeline's map gives that output frame, delta = -4 .. +4. -> {key: dict(flat, scores {delta: mean correlation over the frames})}.
-    A render of this timeline matches at delta 0 (+-1 from the shutter blur) with 0.65 and more; a master of another timeline scores about 0."""
+    timeline's map gives that output frame, delta = -4 .. +4. -> {key: dict(flat, flats, scores {delta: mean correlation over the frames},
+    per {j: {delta: the correlation of that frame alone}})}. A render of this timeline matches at delta 0 (+-1 from the shutter blur) with 0.65
+    and more; a master of another timeline scores about 0."""
     import clipio
     from concurrent.futures import ThreadPoolExecutor
     cap = cv2.VideoCapture(VID)
@@ -294,7 +297,7 @@ def _match(VID, cases, workers=6):
         if not js:
             continue
         cap.set(cv2.CAP_PROP_POS_FRAMES, n0 + js[0])
-        m, flat, got = [], False, []
+        m, flat, flats, got = [], False, {}, []
         for j in range(js[0], js[-1] + 1):                      # consecutive frames: read them all, keep the wanted ones
             ok, fr = cap.read()
             if not ok:
@@ -303,14 +306,15 @@ def _match(VID, cases, workers=6):
                 continue
             gray = cv2.cvtColor(fr[frame.WIN_Y:frame.WIN_Y + frame.WIN_H, :frame.WIN_W], cv2.COLOR_BGR2GRAY)
             vv = np.concatenate([band(gray, y0a, y0a + ha, x0a, x0a + wa).ravel(), band(gray, y0b, y0b + ha, x0b, x0b + wa).ravel()])
-            flat = flat or float(vv.std()) < 3.0                  # black / one colour: nothing to match
+            flats[j] = float(vv.std()) < 3.0                      # black / one colour: nothing to match
+            flat = flat or flats[j]
             m.append(z(vv))
             got.append(j)
         if got == js:
-            jobs.append((key, i, n0, js, m, flat))
+            jobs.append((key, i, n0, js, m, flat, flats))
 
     def work(job):
-        key, i, n0, js, zm, flat = job
+        key, i, n0, js, zm, flat, flats = job
         s = T.SEGS[i]
         pj = [float(s["map"](T.frame_beat(n0 + j))[0]) for j in js]
         lo, hi = max(0, int(np.floor(min(pj))) - 5), min(clipio.n_frames(s["clip"]) - 1, int(np.ceil(max(pj))) + 5)
@@ -328,7 +332,11 @@ def _match(VID, cases, workers=6):
             c = [float(zm[t] @ zs[int(round(pj[t])) + dl - lo]) for t in range(len(js)) if 0 <= int(round(pj[t])) + dl - lo < len(zs)]
             if len(c) == len(js):
                 scores[dl] = float(np.mean(c))
-        return (key, dict(flat=flat, scores=scores)) if scores else None
+        per = {}                                                # each frame's own offset scores: faithful() decides on the flagged frame alone
+        for t in range(len(js)):
+            q0 = int(round(pj[t]))
+            per[js[t]] = {dl: float(zm[t] @ zs[q0 + dl - lo]) for dl in range(-4, 5) if 0 <= q0 + dl - lo < len(zs)}
+        return (key, dict(flat=flat, flats=flats, scores=scores, per=per)) if scores else None
 
     with ThreadPoolExecutor(workers) as ex:
         return dict(r for r in ex.map(work, jobs) if r)
@@ -341,8 +349,9 @@ def alignment(VID, T_=None, back=0, ahead=5):
     kill accent (punch, shake, exposure pop, radial burst, rays, inverted frame), so the measure is clean (measured on a vertical edit with
     the model accents: 0.69 to 0.98 at offset 0 before the shot against 0.57 with a false best offset of +4 after a level-3 shot). A take cut
     a few frames before its shot (the worked example's 4-frame lead): j = -back .. ahead after it, a level 3 kill's impact frames +0..+2
-    left out. -> list of dicts: beat, level, take, clip, K, n0, measurable (False: a flat picture, nothing to match), delta
-    (the best offset; None when nothing matched: score under 0.5), score, clear (the score of delta against the score of 0: how clearly it beats
+    left out. EVERY kill appears in the list: -> beat, level, take, clip, K, n0, measurable (False: a flat picture, or the master's frames /
+    the clip could not be read: nothing to match, never a pass), delta (the best offset; None when nothing matched: score under 0.5, or
+    nothing measured), score (None when nothing was measured), clear (the score of delta against the score of 0: how clearly it beats
     'no offset'; a static scene has ~0 and says nothing), scores."""
     global T
     T = T_ if T_ is not None else (T or preflight.timeline())
@@ -357,9 +366,14 @@ def alignment(VID, T_=None, back=0, ahead=5):
             js = list(range(3 if lv == 3 else -back, (ahead + 2 if lv == 3 else ahead) + 1))
         cases.append((q, i, n0, js))
         kills[q] = (k, lv, i, n0)
+    res = _match(VID, cases)
     out = []
-    for q, r in sorted(_match(VID, cases).items()):
-        k, lv, i, n0 = kills[q]
+    for q, (k, lv, i, n0) in sorted(kills.items()):                             # every kill, also the ones _match could not read
+        r = res.get(q)
+        if r is None:                                                           # a kill that vanished from the table would read as a pass
+            out.append(dict(beat=k, level=lv, take=i, clip=T.SEGS[i]["clip"], K=float(T.SEGS[i]["map"](k)[0]), n0=n0,
+                            measurable=False, delta=None, score=None, clear=None, scores={}))
+            continue
         sc = r["scores"]
         best = max(sc, key=sc.get)
         out.append(dict(beat=k, level=lv, take=i, clip=T.SEGS[i]["clip"], K=float(T.SEGS[i]["map"](k)[0]), n0=n0, measurable=not r["flat"],
@@ -367,13 +381,23 @@ def alignment(VID, T_=None, back=0, ahead=5):
     return out
 
 
+def accent_frames():
+    """Output frames the timeline deliberately shows instead of the source picture: the inverted monochrome impact frame of a level-3 kill
+    (timeline IMPACT, LOOK impact True). A jump / stall there is the accent's own motion, not a render fault, so faithful() accepts it."""
+    return set(invert_frames())
+
+
 def faithful(VID, frames, T_=None):
-    """Does the master show, around each output frame of `frames` (the jumps / stalls analyze() flagged), the source frames the timeline asks for?
+    """Does the master show, at each output frame of `frames` (the jumps / stalls analyze() flagged), the source frame the timeline asks for?
     If it does, the jump or pause is in the footage itself (a shot that did not kill, an ability, a real pause of the aim): the render is
-    faithful, the edit is not at fault. -> {n: dict(ok, delta, score, scores)}; ok = the match at delta 0 is 0.6 or more and no offset of 2 or
-    more beats it by 0.03 (a flat picture gives ok False: not measurable). Only the frames n-2 .. n+2 of the same take count."""
+    faithful, the edit is not at fault. -> {n: dict(ok, delta, score, scores)}; ok = the master's OWN frame n matches the source frame p(n)
+    (the correlation at delta 0 is 0.6 or more and no offset of 2 or more beats it by 0.03). The frames n-2 .. n+2 of the same take are only
+    the context of the read: they cannot outvote frame n (a mean over them let four correct neighbours hide a one-frame stall, and the gate
+    then passed a stutter as gameplay). An accent frame of the timeline (the inverted impact frame of a level-3 kill) is deliberately not the
+    source picture: it is accepted whatever its score. A flat picture gives ok False: not measurable."""
     global T
     T = T_ if T_ is not None else (T or preflight.timeline())
+    acc = accent_frames()
     cases = []
     for n in frames:
         i = T.take_of(n)
@@ -381,10 +405,10 @@ def faithful(VID, frames, T_=None):
         cases.append((n, i, n, js))
     out = {}
     for n, r in _match(VID, cases).items():
-        sc = r["scores"]
-        best = max(sc, key=sc.get)
-        out[n] = dict(ok=(not r["flat"]) and sc.get(0, 0) >= 0.6 and not (abs(best) >= 2 and sc[best] - sc.get(0, 0) >= 0.03),
-                      delta=best, score=sc.get(0, 0), scores=sc)
+        sc = r["per"].get(0) or {}
+        best = max(sc, key=sc.get) if sc else 0
+        out[n] = dict(ok=(n in acc) or ((not r["flats"].get(0, True)) and sc.get(0, 0) >= 0.6 and not (abs(best) >= 2 and sc[best] - sc.get(0, 0) >= 0.03)),
+                      delta=best, score=sc.get(0), scores=sc)
     return out
 
 

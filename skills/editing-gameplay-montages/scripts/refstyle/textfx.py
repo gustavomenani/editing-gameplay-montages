@@ -63,7 +63,8 @@ for _k in _over:
 for _k in STYLES:
     STYLES[_k] = {**DEFAULTS, **STYLES[_k], **_over.get(_k, {})}
 for _st in STYLES.values():
-    _st["cap"] = int(round(_st["cap"] * frame.CAP_K))             # vertical: frame.CAP_K (the caps of cover.py are set after this, in its own frame)
+    _st["cap"] = int(_st["cap"] * frame.CAP_K)                    # vertical: frame.CAP_K, TRUNCATED: user-rules.md lists 135 / 121 px (0.60 x
+                                                                  # 226 = 135.6; round() gave 136, one px over the rule). cover.py's caps are set after this, in its own frame
 PAD = 70                              # room around the word for glow / shadow
 LP = 18                               # room around a letter for the colour split
 

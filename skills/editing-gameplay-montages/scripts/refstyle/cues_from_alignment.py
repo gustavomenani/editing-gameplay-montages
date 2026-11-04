@@ -21,7 +21,8 @@ Method (lyrics_attack.py holds the definitions and the assignment):
      cue_audit.json), never silently chosen. A flagged word that is wrong is fixed with `word@beat` in lyrics.txt;
   5. a word pinned in lyrics.txt (word@beat) starts at that beat instead;
   6. each word stays while it is sung: until the next shown word, or until the voice stops when a silence follows;
-  7. a word that would be on screen under 0.22 beat is shown together with the next one;
+  7. a word that would be on screen under 0.25 beat is shown together with the next one; a cue is never shorter than 0.21 beat (the
+     timeline asserts b > a + 0.2: the end cap alone left a 0.19-beat cue on a pair 0.22-0.24 beat apart and the draft refused it);
   8. style: "red" for cues that start inside a --red range (default: the intro, before beat -0.5), otherwise gold, silver
      and white in turn.
 Stability: the assignment is repeated on every sub-frame run of the alignment; a word whose cue moves over 8.3 ms between
@@ -29,6 +30,8 @@ the runs is listed with the number (an unstable word sits between two attacks).
 Words typed `sung=-` take part in the alignment but get no cue. The table prints per word: the chosen beat, the CTC beat
 (mean of the models), the difference in ms, how it was chosen (rise in dB), how far the models and the runs were apart and
 the flags. The words under "CHECK" are the ones to look at first (lyric_sync_sheet.py zoom panels; lyrics_audit.py).
+Cues that start or end outside the timeline's own R0 .. R1 are listed at the end with a WARN: a word pinned or sung past the
+section is never (or only partly) drawn there.
 Typed words that are not what is sung (a line missing or extra, another wording, T0 inside a sung line) send the two models
 to different places: a word whose models are over 0.35 s apart stops the script before anything is written (--force
 writes anyway). With one alignment only this cannot be seen: read the sheet.
@@ -70,6 +73,9 @@ ap.add_argument("--force", action="store_true")
 args = ap.parse_args()
 OFF, ADV, LAST_END = args.t0, args.adv, args.last_end
 AUDIT = args.audit_out or os.path.join(os.path.dirname(args.stem) or ".", "cue_audit.json")
+MIN_CUE = 0.21          # shortest cue the timeline accepts (timeline_ref_example.py: b > a + 0.2); the end cap is 0.04 before the next cue
+MERGE = MIN_CUE + 0.04  # a word closer than this to the group's start joins it: 0.25 - 0.04 = MIN_CUE, so no cue can fall between the two rules
+R0, R1 = getattr(T, "R0", None), getattr(T, "R1", None)      # the section the timeline draws
 if args.red is None:
     RED = [(-1e9, -0.5)]
 else:
@@ -155,11 +161,11 @@ if len(als) > 1 and not args.force:
                     sorted({r["line"] for r in lost})[:6], args.words))
 if not shown_rows:
     sys.exit("cues_from_alignment.py: every word of %s is marked as not shown (sung=-)." % args.words)
-cues, k = [], 0
+cues, k, notes = [], 0, []
 while k < len(shown_rows):
     r = shown_rows[k]
     text, j = r["shown"], k
-    while j + 1 < len(shown_rows) and shown_rows[j + 1]["b"] - r["b"] < 0.22:
+    while j + 1 < len(shown_rows) and shown_rows[j + 1]["b"] - r["b"] < MERGE:
         j += 1
         text += " " + shown_rows[j]["shown"]
     nxt = shown_rows[j + 1]["b"] if j + 1 < len(shown_rows) else None
@@ -167,14 +173,31 @@ while k < len(shown_rows):
     stop = T.beat_time(nxt) if nxt is not None else e_last + 1.0
     sil = stem.silences(e_last - 0.05, stop)
     end_v = hit(sil[0][0]) if sil else hit(stop)
+    start = round(r["b"] - ADV, 4)
     if nxt is None:
         end = end_v + 0.10 if LAST_END is None else min(LAST_END, end_v + 0.10)
+        if LAST_END is not None and end < start + MIN_CUE:
+            notes.append("the last cue would end at %.3f (--last-end %.3f), under the %.2f beat the timeline accepts: it ends at %.3f instead" % (
+                end, LAST_END, MIN_CUE, start + MIN_CUE))
     else:
         end = min(nxt - ADV - 0.04, max(end_v + 0.10, r["b"] + 0.35))
+    end = round(max(end, start + MIN_CUE), 4)       # never emit a cue the timeline refuses ("word on screen too briefly")
     for q in shown_rows[k:j + 1]:
         q["cue"] = len(cues)
-    cues.append([round(r["b"] - ADV, 4), round(end, 4), text])
+    cues.append([start, end, text])
     k = j + 1
+outside = []                                        # words pinned / sung past the section: the timeline draws only R0 .. R1
+if isinstance(R0, (int, float)) and isinstance(R1, (int, float)) and R1 > R0:
+    for c in cues:
+        why = []
+        if c[0] < R0 - 1e-9:
+            why.append("%.3f beat before R0: its first frames are not drawn" % (R0 - c[0]))
+        if c[0] > R1 + 1e-9:
+            why.append("%.3f beat after R1: never drawn" % (c[0] - R1))
+        if c[1] > R1 + 1e-9:
+            why.append("ends %.3f beat after R1: drawn only up to R1" % (c[1] - R1))
+        if why:
+            outside.append((c, why))
 cyc, n_plain = ["gold", "silver", "white"], 0
 for c in cues:                                                  # red inside the --red ranges, metallic tints elsewhere
     if any(lo < c[0] < hi for lo, hi in RED):
@@ -204,6 +227,13 @@ print()
 for c in cues:
     print("%7.3f %7.3f  %-10s %s" % tuple(c))
 print(len(cues), "cues ->", args.out, "; evidence per word ->", AUDIT)
+for n_ in notes:
+    print("note:", n_)
+if outside:
+    print("\nWARN: %d of %d cues lie outside the section the timeline draws (R0 = %g, R1 = %g):" % (len(outside), len(cues), R0, R1))
+    for c, why in outside:
+        print("  %7.3f %7.3f  %-10s %s" % (c[0], c[1], c[2], "; ".join(why)))
+    print("  a word pinned or sung outside R0 .. R1 is never (or only partly) drawn: move the pin into the section, or move R0 / R1")
 # the words to look at first on the lyric_sync_sheet.py zoom panels
 chk = []
 for i, r in enumerate(rows):

@@ -60,8 +60,9 @@ drop, on backbeat snares and on "hit" bullets; 1 elsewhere; for an M take the le
 (kills of one clip closer than a lead plus a death are one take by themselves; "bass" also joins kills at most 6 beats apart in real time;
 say false to keep them apart where they fit); "bullet" true (the drop kill) or "hit"; "upto"; "at" (optional: the timeline beat the kill
 must land on, a multiple of 0.25, e.g. the last kill on the last sung word; it lands on the measured attack there, and where the music
-has no hit it sounds on the pinned beat and the draft says so; intro kills take it too); "mute" (voice chat over it); "n" (source frames in
-the blur-in; with max_speed it is a ceiling check, so leave it out); "k_checked": true (see "K" below).
+has no hit it sounds on the pinned beat and the draft says so; intro kills take it too); "mute" (voice chat over it); "n" (2 or more source
+frames in the blur-in: 1 would show one frame through the whole entry and is refused; with max_speed it is a ceiling check, so leave it out);
+"k_checked": true (see "K" below).
 
 K: a kill whose K is unverified is REFUSED (a frame off is 16.7 ms of desync): there is no kills.json, or no entry for it (looked up by "id", else clip and K,
 also the K that kverify.py corrected), or the plan's K differs from the entry's, or its "how" is not "ammo" / "flash" ("ammo-loose", "guess", an old entry with
@@ -95,7 +96,7 @@ What it decides, from the music (beat_hits.py) and the clips' lengths (pts/):
     real time, push-in 5 %, a riser ending on the measured hit, a boom; a "hit" bullet: a 2 to 3 beat lead-in at 0.5x, the same flash, riser
     and boom, starting on a 1/4-beat line;
   * a bullet time where the drums thin out ("auto_bullet", only when no kill is marked "hit"): in the body (after the drop, before the last take) it
-    looks for 1.5 beats or more where every half beat of kick / snare / hat falls under 25 % of the section's typical hit (the median hit; at most half
+    looks for 1.5 beats or more where every half beat of kick / snare / hat falls under 35 % of the section's typical hit (the median hit; at most half
     the section's mean level), after a passage that is at least 0.3 louder and followed within 2 beats by a strong hit. The most pronounced one
     (the fall times its length up to a bar) becomes a "hit" bullet: the kill the draft places nearest after it is moved onto that strong hit
     ("at") and drafted again, at most one per 30 s of video. When it cannot fit, or the drums do not thin out, a note says why;
@@ -121,7 +122,8 @@ Systematic drift: when the measured attacks of the strong hits drift against the
 the BPM is wrong) it refuses, with the fitted slope and the better BPM (music_grid.py).
 
 It refuses, with the numbers, when the plan cannot fit: a hit missing on the drop or on the first kill, too few kicks for the takes,
-a clip without enough footage before or after a kill, kills too close for a lead and a death, a length that the kills cannot fill.
+a clip without enough footage before or after a kill, kills too close for a lead and a death, two takes of one clip that would show the
+same footage (a kill) twice, a length that the kills cannot fill.
 The file is built from timeline_ref_example.py by replacing the blocks between its `# >>> draft:...` / `# <<< draft:...` markers.
 Before writing it runs the built file: the preflight (SYNC 2, grid identities, exact frames, clips, anchors, music, MAX_SPEED: every frame at
 most max_speed), the lead of every take in shown frames, every death shown, every kill on a measured attack, every cut on its lattice line /
@@ -316,6 +318,9 @@ def apply_reference(P, E):
     elif a.get("frame") in ("horizontal", "vertical"):
         P["frame"] = a["frame"]
         ref.took("frame", "%s (the reference's orientation)" % a["frame"])
+        if a.get("layout") == "window" and a["frame"] == "horizontal":
+            ref.skipped("layout", "the reference puts its gameplay in a window over a blurred backdrop, but its canvas is horizontal and FRAME = \"horizontal\" fills the "
+                                  "frame with the clip: that measured window is NOT drafted (only FRAME = \"vertical\" builds one; ref_notes.json has its rect)")
     else:
         ref.skipped("frame", "the reference gave none: %s (the model default)" % P["frame"])
     lk = a.get("look")
@@ -490,6 +495,14 @@ def load_plan(path):
             if p["bullet"] or lkind:
                 E.append("%s: a bullet-time kill is a take of its own (no with_previous on it, or on the kill after it)" % tag)
         npl = k.get("n")
+        if npl is not None:
+            if isinstance(npl, bool) or not isinstance(npl, (int, float)) or int(npl) != npl:
+                E.append('%s: "n" is the number of source frames squeezed into the blur-in, a whole number (leave it out to enter at real time), not %r' % (tag, npl))
+                continue
+            if npl < 2:
+                E.append('%s: "n": %g is not a blur-in: two of the entry\'s anchors would show the same source frame and the footage would stand still '
+                         '(the draft then fails its own check). Use 2 or more, or leave "n" out' % (tag, npl))
+                continue
         if npl is not None and ms is not None:
             sq = (float(npl) - 1.0) / (P["lead_frames"] - 1.0)
             if sq > ms * 1.02:
@@ -1333,6 +1346,20 @@ def pick_bumps(H, kill_beats, R0, luma0, calm0, seconds):
 
 
 # ------------------------------------------------------------------------------------------------ statistics and checks
+def body_kill_rate(ns, per, n_intro):
+    """Kills per second over the window the reference's rate is measured on: from the first BODY cut (after the intro) to the start of the
+    fade, never the whole video. An intro before the first body cut would otherwise dilute the draft's rate (a 12 s intro doubled the
+    reference's demand) because the reference counts from its first cut too. -> (rate or None, seconds of the window)."""
+    segs = ns["SEGS"]
+    if not segs:
+        return None, 0.0
+    b0 = segs[min(n_intro, len(segs) - 1)]["r0"] - ns.get("CUT_LEAD", 0) / float(ns.get("FPB", 60.0))     # the SHOWN first cut
+    win = (ns["LUMA_FADE"][0] - b0) * per
+    if win <= 1e-6:
+        return None, 0.0
+    return len(ns["KILLS"]) / win, win
+
+
 def body_slow_share(ns):
     """share of the frames below SLOW_BELOW x in the body: not the intro, not the calm last take (the reference's slow share is measured there)"""
     seg, v = preflight.frame_speeds(types.SimpleNamespace(**ns))
@@ -1530,20 +1557,26 @@ def verify(ns, H, cuts_on, lead_frames, pins=(), ladder=LADDER):
 
 
 # ------------------------------------------------------------------------------------------------ levels, blur-ins
-def assign_levels(takes, H, ib, n):
+def assign_levels(takes, H, ib, n, D):
     """level of every take: the plan's, else 3 on the drop kill, the strongest snare of the body and the last kill; 2 on the first two takes
     after the drop, on the strongest backbeat snares (level 2 on at most LV2_SHARE of the takes in all) and on "hit" bullets; 1 elsewhere.
-    Sets tk.lv and tk.first_after_drop. -> the take index of the
-    strongest snare (or None)"""
+    A take whose first kill is before the drop is no accent of the drop's section: it is never the best snare and never one of the first
+    kills after the drop (D = the drop in timeline beats; the drop take's kill sits on the quarter-beat row 4 * D). Sets tk.lv and
+    tk.first_after_drop. -> the take index of the strongest snare (or None)"""
+    drop_b = H.beat(4 * D) if ib is not None else float(D)  # the drop's musical beat: takes before it belong to section A, not to the drop's body
+    at_drop = 0.5 / H.F                                     # half a frame: a kill measured a hair before the grid beat still sits "at" it
     snare = {}
     for j, tk in enumerate(takes):
-        if tk.level is None and tk.kind != "L" and j != n - 1:
+        if tk.level is None and tk.kind != "L" and j != n - 1 and tk.first >= drop_b - at_drop:
             snare[j] = H.snare(tk.last_u)
     best = max(snare, key=snare.get) if snare and max(snare.values()) >= SN2 else None
     after, nk = set(), 0                                    # the takes holding the first two kills after the drop
-    for j in range((ib if ib is not None else -1) + 1, n - 1):
+    start = (ib + 1) if ib is not None else next((x for x, tk in enumerate(takes) if tk.first >= drop_b - at_drop), n - 1)
+    for j in range(start, n - 1):
         if nk >= 2:
             break
+        if takes[j].first < drop_b - at_drop:
+            continue
         after.add(j)
         nk += len(takes[j].Ks)
     fixed2 = sum(1 for j, tk in enumerate(takes) if tk.level is None and j != best and (tk.lkind == "hit" or (j in after and tk.lkind != "drop" and j != n - 1)))
@@ -1584,6 +1617,16 @@ def tin_quotas(shares, n):
     for k in sorted(kinds, key=lambda k: -(raw[k] - q[k]))[:n - sum(q.values())]:
         q[k] += 1
     return q
+
+
+def ref_transitions(shares):
+    """The reference's measured transition shares (hard / whip / zoom / roll), or None when it measured none: a missing block, or the
+    all-zero dict an older ref_analyze.py wrote when no cut kind was classified. The drafter reported "transitions followed" on those zeros
+    while it used the model's pattern (item 3): an all-zero dict is "not measured"."""
+    if not isinstance(shares, dict):
+        return None
+    got = {k: max(0.0, float(shares.get(k) or 0.0)) for k in ("hard", "whip", "zoom", "roll")}
+    return got if sum(got.values()) > 0 else None
 
 
 def assign_tins(ent, takes, shares=None):
@@ -2149,7 +2192,7 @@ def draft(args, P, kills, find):
     R0 = r0_for((chain[0]["u"] / 4.0 if ib == 0 else 0.0), takes[0].start)
     for j, tk in enumerate(takes):
         tk.end = takes[j + 1].start if j + 1 < n else R1
-    best_snare = assign_levels(takes, H, ib, n)
+    best_snare = assign_levels(takes, H, ib, n, D)
     nf = lambda r: int(math.floor((r - R0) * T.F + 0.5))
 
     # ---- where the drums thin out: a bullet time into the next strong hit (model-edit.md), unless the plan says otherwise
@@ -2231,10 +2274,10 @@ def draft(args, P, kills, find):
         ent.append(sh)
     for j, tk in enumerate(takes):
         ent.append(dict(kind="take", j=j, tk=tk))
-    shares = (ref.a.get("transitions") if ref is not None and ref.a else None)
+    shares = ref_transitions(ref.a.get("transitions") if ref is not None and ref.a else None)
     tins, tcount = assign_tins(ent, takes, shares)
     if ref is not None and ref.a:
-        if shares and any(isinstance(shares.get(k), (int, float)) for k in ("hard", "whip", "zoom", "roll")):
+        if shares:
             nbody = sum(tcount.values())
             ref.took("transitions", "body takes %s of %d (reference: %s); a zoom burst goes to the level 2 / 3 and bullet takes first" % (
                 ", ".join("%d %s" % (tcount.get(k, 0), k) for k in ("hard", "whip", "zoom", "roll")), nbody,
@@ -2243,7 +2286,10 @@ def draft(args, P, kills, find):
                     "%.0f %% %s" % (100 * float(shares[k]), k) for k in ("flash", "dip") if isinstance(shares.get(k), (int, float)) and shares[k] > 0)
                  if any(isinstance(shares.get(k), (int, float)) and shares[k] > 0 for k in ("flash", "dip")) else ""))
         else:
-            ref.skipped("transitions", "the reference gave no shares: the model's pattern (zoom on level 2 / 3, whips alternating, a roll about every fourth take)")
+            raw = ref.a.get("transitions") or {}                     # an older ref_notes.json may still hold the all-zero dict
+            only = [k for k in ("flash", "dip") if isinstance(raw.get(k), (int, float)) and raw[k] > 0]
+            ref.skipped("transitions", "the reference gave no shares to copy%s: the model's pattern (zoom on level 2 / 3, whips alternating, a roll about every fourth take)" % (
+                " (its cuts are %s transitions, which the draft does not build)" % " / ".join(only) if only else ""))
     SV = Solver(P, T, takes, H, D, bass, None, ladder)
     pins = {tk.first for tk in takes if tk.at[0] is not None and tk.first_u not in H.att}
     pins |= {b for tk in takes for a_, b in zip(tk.at[1:], tk.tails) if a_ is not None and uq(b) not in H.att}
@@ -2432,6 +2478,28 @@ def draft(args, P, kills, find):
     notes += res["notes"]
     lines = res["lines"]
 
+    # ---- two takes of one clip must not replay each other's footage: a take's death and its run-out show the clip up to its cut, so when the
+    # next take's first kill lies inside those source frames the picture jumps back inside the clip and that kill is shown twice (it can be a
+    # whole kill later in the plan's list, not just its lead-in). The plan fixes it (one take, or another kill): the anchors are never shifted
+    # silently to hide it.
+    ov = []
+    for j in range(1, n):
+        if takes[j].clip != takes[j - 1].clip:
+            continue
+        prev = ns["SEGS"][len(intro) + j - 1]
+        shown_to = float(prev["map"](prev["r1"])[0])         # the last source frame the take before it shows
+        if takes[j].Ks[0] < shown_to + 1 - 1e-6:
+            a, b = takes[j - 1].kills[-1], takes[j].kills[0]
+            fix = ("the plan already joins them and no placement of one take exists: use another kill whose source frames start after frame %.0f" % shown_to
+                   if b["wp"] else
+                   "mark kill #%d \"with_previous\": true so both are one take (if the hits let it play its real-time distance), or use another kill whose "
+                   "source frames start after frame %.0f" % (b["i"] + 1, shown_to))
+            ov.append("kills #%d (%s K=%d) and #%d (%s K=%d) are two takes of one clip, but the first shows %s up to source frame %.1f and the second's kill is at "
+                      "frame %d: the picture would jump back inside the clip and show that kill twice. %s" % (
+                          a["i"] + 1, a["clip"], a["K"], b["i"] + 1, b["clip"], b["K"], a["clip"], shown_to, b["K"], fix))
+    if ov:
+        die(ov, "cannot place two takes of one clip without replaying footage")
+
     # ---- run the built file before writing it
     errs, warns = verify(ns, H, P["cuts_on"], float(P["lead_frames"]), pins, ladder)
     seconds = (R1 - R0) * per
@@ -2440,9 +2508,12 @@ def draft(args, P, kills, find):
         ck = len(ns["SEGS"]) - 1
         kp = (ref.a.get("kills") or {}).get("per_s")
         if isinstance(kp, (int, float)) and kp > 0:
-            mine = len(ns["KILLS"]) / seconds
-            (ref.took if abs(mine - kp) <= 0.25 * kp else ref.skipped)("kills", "%.2f kills per second against the reference's %.2f%s" % (
-                mine, kp, "" if abs(mine - kp) <= 0.25 * kp else " (outside +-25 %%: %s)" % ("add kills or ask for fewer seconds" if mine < kp else "use fewer kills or ask for more seconds")))
+            mine, win = body_kill_rate(ns, per, len(intro))          # the SAME window as the reference: first body cut -> fade
+            if mine is None:
+                ref.skipped("kills", "the draft has no body window to compare with the reference's %.2f kills per second (the intro runs into the fade)" % kp)
+            else:
+                (ref.took if abs(mine - kp) <= 0.25 * kp else ref.skipped)("kills", "%.2f kills per second from the first body cut to the fade (%.1f s) against the reference's %.2f%s" % (
+                    mine, win, kp, "" if abs(mine - kp) <= 0.25 * kp else " (outside +-25 %%: %s)" % ("add kills or ask for fewer seconds" if mine < kp else "use fewer kills or ask for more seconds")))
         cr = ref.a.get("cut_rate_per_s")
         if isinstance(cr, (int, float)) and cr > 0:
             mine = ck / seconds

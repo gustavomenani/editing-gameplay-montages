@@ -30,8 +30,14 @@ Checks for a finished timeline (problems / --check), each item {severity, code, 
   ERROR duplicate        two takes show the same source moment (same clip K+-2, or two files of the same footage)
   ERROR wrong-shot       K is not the killing shot: kills.json has a high-confidence kill 2+ frames away from K (medium: 4+ frames; low/guess: WARN)
   ERROR k-after-row      K lies 2-12 frames after the feed row of a kill of that clip (the row follows the killing shot, never precedes it)
-  WARN  unverified       no kill row follows K within 14 frames (kill not detected, or K set by hand): look at it
+  ERROR unverified       no kill row follows K inside the lag window of the game profile (lag.feed_frames, widened): the shot killed
+                         nobody, so a clip where nobody dies cannot be delivered (gate.py makes an ERROR of a hidden kill and the drafters
+                         refuse a no_shot entry)
   WARN  weak-shot        the matching kills.json entry has no shot signal (guess/low): K is +-3 frames
+
+The lag window of every kill entry comes from its game profile (kills.json "game", else valorant: mykills.py's entries carry none).
+The contact sheet crops the profile's "review.action" / "review.feed" rectangles; a profile copied before that block existed gets
+the rectangles this file used to hardcode (Valorant's).
 """
 import argparse, glob, json, os, sys, time
 import numpy as np
@@ -47,7 +53,47 @@ FLICK_MAX = 1.0                # points of a full flick: the flick measure did N
 CLASS = {"high": "high", "medium": "medium", "low": "low", "guess": "guess",           # kills.json of other tools (mykills.py, kill_table.py): ammo / ammo-loose / guess
          "ammo": "high", "ammo-loose": "medium"}
 HS_MIN = 0.6
-ROW_LAG = (2, 16)              # frames from K to its feed row that still count as "this row belongs to this shot"
+ROW_LAG = (2, 20)              # frames from K to the feed row of its kill: FALLBACK window for a kills.json whose entries carry no game
+                               # profile. It is Valorant's lag.feed_frames (4..12) widened by LAG_NEAR / LAG_FAR - the widening feed_lag()
+                               # applies to a profile's own window. The file used to hardcode this window for every game (written as
+                               # (2, 16) + 4), so a cs2 (3..20) or generic (3..30) kill whose row arrives late was never "near"
+LAG_NEAR, LAG_FAR = 2, 8       # ... frames a K may sit outside the profile's lag window on the near side / the far side
+GAMES = os.path.join(HERE, "games")
+REVIEW = {"action": [576, 324, 768, 432], "feed": [1300, 84, 616, 216]}   # contact-sheet rectangles [x, y, w, h] of the 1920x1080
+                                                                          # frame when the profile has no "review" block: Valorant's
+_PROFILES = {}
+
+
+def profile(game=None):
+    """games/<game>.json as a dict, cached; {} when there is no such profile (an old kills.json without "game", or a project
+    that copied only some of games/). No game = valorant: mykills.py's entries carry none and the reference project is Valorant."""
+    g = os.path.splitext(os.path.basename(game or "valorant"))[0]
+    if g not in _PROFILES:
+        try:
+            _PROFILES[g] = json.load(open(os.path.join(GAMES, g + ".json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            _PROFILES[g] = {}
+    return _PROFILES[g]
+
+
+def feed_lag(game=None):
+    """(lo, hi) frames from the shot to the feed row of its kill, from the game profile's lag.feed_frames, widened by LAG_NEAR /
+    LAG_FAR frames: the timeline's K and the kills.json K can each sit a frame or two off the shot, and kills_auto.py takes a row
+    that arrives as late as lag.long (its third lag window) only with ammo AND flash. -> ROW_LAG when the entry's game has no
+    profile (a project from before kills.json wrote "game")."""
+    lag = profile(game).get("lag") or {}
+    if not lag.get("feed_frames"):
+        return ROW_LAG
+    lo, hi = lag["feed_frames"]
+    return max(0, lo - LAG_NEAR), max(hi, lag.get("long", hi + LAG_FAR))
+
+
+def review_crops(game=None):
+    """([x, y, w, h] action tile, [x, y, w, h] kill-feed tile) of the contact sheet, from the game profile's "review" block.
+    The file used to hardcode Valorant's two rectangles, so a cs2 or generic take showed a corner of the map where its kill feed
+    is - and that tile is the reviewer's only way to judge a kill. A profile copied before the block existed keeps REVIEW."""
+    r = profile(game).get("review") or {}
+    return tuple(list(r.get(k) or REVIEW[k]) for k in ("action", "feed"))
 
 
 # ---------------------------------------------------------------------------------------------- features
@@ -208,23 +254,25 @@ def print_table(rows, dropped, top=None):
 
 
 def contact_sheet(rows, kills, path, per=6):
-    """kill_rank.jpg: one row per pick: centre crop at K-6, K, K+8 and the feed at K+12; header = rank, id, score, reasons."""
+    """kill_rank.jpg: one row per pick: the profile's "review.action" crop at K-6, K, K+8 and its "review.feed" crop at K+12
+    (see review_crops: the feed tile has to be the game's own feed); header = rank, id, score, reasons."""
     import clipio, kills_auto
     sheets = []
     for r in rows:
         k = kills[r["id"]]
         K, c = k["K"], k["clip"]
         n = clipio.n_frames(c)
+        (ax, ay, aw, ah), (fx, fy, fw, fh) = review_crops(k.get("game"))
         tiles = []
         for off in (-6, 0, 8):
             f = min(max(K + off, 0), n - 1)
             fr = kills_auto.read(c, f, f)[0]
-            t = cv2.resize(fr[324:756, 576:1344], (320, 180), interpolation=cv2.INTER_AREA)
+            t = cv2.resize(fr[ay:ay + ah, ax:ax + aw], (320, 180), interpolation=cv2.INTER_AREA)
             cv2.putText(t, "K%+d" % off if off else "K", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
             tiles.append(t)
         f = min(K + 12, n - 1)
         fr = kills_auto.read(c, f, f)[0]
-        tiles.append(cv2.resize(fr[84:300, 1300:1916], (320, 180), interpolation=cv2.INTER_AREA))
+        tiles.append(cv2.resize(fr[fy:fy + fh, fx:fx + fw], (320, 180), interpolation=cv2.INTER_AREA))
         head = np.zeros((26, 1280, 3), np.uint8)
         text = "#%d  id %s  %s K=%d  score %.1f  %s" % (r["rank"], r["id"], c, K, r["score"], ", ".join(r["reasons"]))
         cv2.putText(head, text[:120], (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
@@ -270,8 +318,15 @@ def problems(kills, used, rows_other=None, pairs=None, pts_of=None):
     for u in used:
         c, K = u[0], int(u[1])
         where = f"{c} K={K}" + (f" (beat {u[2]:g})" if len(u) > 2 else "")
-        near = [(i, k) for i, k in by.get(c, []) if ROW_LAG[0] <= k.get("feed", k["K"] + 8) - K <= ROW_LAG[1] + 4
-                and ROW_LAG[0] <= k.get("feed", k["K"] + 8) - k["K"] <= ROW_LAG[1] + 4]      # the rows that can belong to a shot at K (and whose own K is a plausible shot for them: an old entry with a 27 frame lag is not evidence)
+        # The rows that can belong to a shot at K, in the lag window of THEIR game profile (Valorant 4..12, cs2 3..20, generic
+        # 3..30, widened by LAG_NEAR / LAG_FAR), and whose own K is a plausible shot for them: an old entry with a 27 frame lag
+        # is not evidence.
+        near = []
+        for i, k in by.get(c, []):
+            lo, hi = feed_lag(k.get("game"))
+            f = k.get("feed", k["K"] + 8)
+            if lo <= f - K <= hi and lo <= f - k["K"] <= hi:
+                near.append((i, k))
         near.sort(key=lambda q: abs(q[1]["K"] - K))
         # same moment used twice (same clip, or the same footage in two files)
         canon = (c, K)
@@ -292,13 +347,16 @@ def problems(kills, used, rows_other=None, pairs=None, pts_of=None):
                              f"set K to {k['K']} (look at the frames {k['K'] - 2}..{k['feed']} to be sure)"))
             continue
         if not near:
-            rows = [o for o in (rows_other or {}).get(c, []) if K + ROW_LAG[0] <= o["onset"] <= K + ROW_LAG[1] + 4]
+            lo, hi = feed_lag(next((k.get("game") for _, k in by.get(c, []) if k.get("game")), None))
+            rows = [o for o in (rows_other or {}).get(c, []) if lo <= o["onset"] - K <= hi]
             if rows:
                 why = "a row where you died" if rows[0]["why"] == "death" else "a teammate's or an enemy's row"
                 out.append(_item("ERROR", "not-yours", where, f"the feed row {rows[0]['onset'] - K} frames after K is {why}, not your kill", "remove this take, or set K to your own kill"))
             else:
-                out.append(_item("WARN", "unverified", where, "no kill row of yours appears within 14 frames after K (kills_auto.py did not find this kill, or K was set by hand)",
-                                 "look at the frames K-6..K+14 (python kill_rank.py --check writes nothing; use kills_auto.py sheets) or take a detected kill"))
+                out.append(_item("ERROR", "unverified", where, "no kill row of yours follows K within %d..%d frames (the lag window of the "
+                                 "game profile): the shot killed nobody. gate.py already fails a take whose kill is hidden and the drafters "
+                                 "refuse a no_shot entry - a clip where nobody dies must not be delivered, and a WARN let it through" % (lo, hi),
+                                 "look at the frames K-6..K+%d (kills_auto.py writes the sheets) or take a detected kill" % hi))
             continue
         i, k = near[0]
         d = K - k["K"]

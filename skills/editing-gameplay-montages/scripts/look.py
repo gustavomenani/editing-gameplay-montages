@@ -17,8 +17,10 @@ The preset "modelo" is the look of the worked example's reference-style edit (br
 In the reference style the accents a timeline.py asks for with IMPACT / BUMPS follow these options: kill_zoom scales the radial burst
 and the bump nudge, fringe the RGB split, flash the bump light, and impact False removes the inverted level-3 frame.
 `python look.py` prints the table. render.py (house style) and refstyle/render.py (reference style) call get(T);
-preflight.py calls problems(T), so a misspelled option or an out-of-range value stops the render with a sentence that says
-what to write instead. Options a style has no use for are accepted and ignored there (the house style has no cinema bars
+preflight.py calls problems(T), so a misspelled option, a wrong type or an unknown grade / preset stops the render with a sentence
+that says what to write instead. A number outside its range is not one of those: get() clamps it to the nearest allowed value and
+prints the clamp (clamps(T) returns the same sentences), which is the documented behaviour of the options.
+Options a style has no use for are accepted and ignored there (the house style has no cinema bars
 and no blur-in cut; each renderer uses the options that have an effect in its style)."""
 import difflib, math, sys, unicodedata
 
@@ -158,10 +160,16 @@ def _resolve(raw):
 
 
 def problems(T):
-    """Readable problems of T.LOOK (for preflight.py): unknown option (with did-you-mean), wrong type, unknown grade or preset,
-    number out of range. [] when it is fine or absent."""
-    _, errors, clamps = _resolve(getattr(T, "LOOK", {}))
-    return errors + [c[3] for c in clamps]
+    """Readable ERRORS of T.LOOK (for preflight.py): unknown option (with did-you-mean), wrong type, unknown grade or preset.
+    A number outside its range is NOT an error: get() clamps it to the nearest usable value and prints the clamp (look-options.md),
+    so a LOOK busy asking for a strong shake does not block the render. clamps(T) returns those sentences. [] when it is fine or absent."""
+    return _resolve(getattr(T, "LOOK", {}))[1]
+
+
+def clamps(T):
+    """The clamp sentences of T.LOOK ("LOOK['shake'] = 2.5 is out of range (0..2): ...; use 2 or less"), for a caller that wants to say them
+    before the render does. get() prints the same sentences, once, when it reads the look."""
+    return [c[3] for c in _resolve(getattr(T, "LOOK", {}))[2]]
 
 
 _STATE = {"grade_amount": 1.0}                       # what the last get() saw, for grade_rgb(img, name) without an amount

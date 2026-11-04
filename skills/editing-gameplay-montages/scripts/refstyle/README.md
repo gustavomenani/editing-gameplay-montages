@@ -4,8 +4,11 @@ Files for the reference style (../../reference-style.md). Copy the standard set 
 (the whole setup with the venv: ../../pipeline.md, "Setup"):
 
 ```bash
-cp "$SK"/scripts/*.* . && cp -r "$SK"/scripts/games "$SK"/models . && cp "$SK"/scripts/refstyle/*.* . && cp timeline_ref_example.py timeline.py
+cp "$SK"/scripts/*.* . && cp -r "$SK"/scripts/games "$SK"/models . && cp "$SK"/scripts/refstyle/*.* . && ([ -e timeline.py ] || cp timeline_ref_example.py timeline.py)
 ```
+
+The `[ -e timeline.py ] ||` guard matters: this is also the line an existing project runs to take a newer copy of the scripts, and an
+unconditional `cp` would replace the user's edit.
 
 Replace the standard file of the same name:
 
@@ -23,7 +26,7 @@ Added:
 | File | What it does |
 |---|---|
 | `timeline_ref_example.py` | the worked example's edit and the drafter's template: the SYNC 2 block (`SYNC = 2`, `hit()`, `frame_beat()`, `nearest_frame()`, `vis()`, `take_of()`, `CUT_LEAD` / `HIT_LEAD` in the `draft:cut` block), entry list `E` in musical beats, `pre()` / `post()` / `fall()` / `flash()`, `TEXT`, `LUMA_FADE`, the empty `# >>> draft:fx` block for the model edit's accents and sound. Its lyric cues are not published (song lyrics); a project gets its own from `lyrics_sync.py` |
-| `frame.py` | the frame geometry from `FRAME` in timeline.py (`"horizontal"` default, `"vertical"`): sizes, gameplay window, word sizes (`WORD_CAP_RED` 226 / `WORD_CAP` 202 px at 1080p, `WORD_MAXW` 70 % of the width, `CAP_K` 0.60 in vertical); read by render.py, textfx.py, check.py, cover.py, cover_plates.py, preview.py. A misspelled `FRAME` stops with a message |
+| `frame.py` | the frame geometry from `FRAME` in timeline.py (`"horizontal"` is only the CODE fallback when a hand-written timeline omits FRAME; `draft_ref_timeline.py` writes `"vertical"`, which is the documented default): sizes, gameplay window, word sizes (`WORD_CAP_RED` 226 / `WORD_CAP` 202 px at 1080p, `WORD_MAXW` 70 % of the width, `CAP_K` 0.60 in vertical); read by render.py, textfx.py, check.py, cover.py, cover_plates.py, preview.py. A misspelled `FRAME` stops with a message |
 | `textfx.py`, `text_test.py` | lyric words: Impact (Windows font folder, or `IMPACT_FONT`), random letter reveal (the first letter on `nearest_frame(cue) - HIT_LEAD`, every letter on `nearest_frame(cue)`), translucent tinted fill, soft shadow, ink centred on the frame (vertical: exact middle of 1080x1920, caps 0.60 of the horizontal ones), the word steps back while a kill plays until the body is down (`duck`, `duck_death`, `duck_max`); `STYLE_OVERRIDES` in timeline.py changes a style; `$PY text_test.py` shows the first cue of every style on a flat background and prints cap, share of height and width, centre offset and the letter-reveal check, `text_test.py vertical` the vertical words |
 | `detect_kills.py`, `kill_review.py` | `$PY detect_kills.py <clips folder> detect` scans raw recordings for the player's kills on the kill feed (a decode that returns more than 2 frames fewer than the file's packet count is retried in software; still short, the file is reported FAILED, no json is written and the exit status is 1); `$PY kill_review.py <clips folder> detect review` writes review sheets and `review/index.json` (copy to `detections.json`) |
 | `mykills.py`, `strip.py`, `flick.py` | shot frame K from the ammo counter (any digit colour: the same detector as `kverify.py`) with galleries (`gal_NN.jpg`: flash on tile `+0`, absent on `-1`): `$PY mykills.py` for every detection not in `BAD`, `$PY mykills.py 12,13` for those ids only (it numbers the sheets from `gal_01.jpg` again, so it overwrites the sheets of a full run, and it rewrites `kills.json`: every entry carries `how`, `conf` and `verified`; `ammo` / `flash` are verified, `ammo-loose` / `guess` are not, and the guess fallback is feed - 7; an old entry with no `how` becomes `guess` / `ammo-loose`, unverified, until measured, so a partial run never marks unmeasured kills verified); per-frame strips to set K by hand; camera travel and earlier shots per kill. The K typed into the timeline entry is the authoritative one: `kills.json` is a regenerated record, read by `flick.py`. `kverify.py` (in `scripts/`) re-measures K on the pictures |

@@ -38,7 +38,8 @@ import beat_hits as bh
 SR = bh.SR
 BAR_MS = 8.3                       # half a frame at 60 fps
 ADEQUATE = 0.05                    # share of strong hits beyond BAR_MS above which one constant grid is not adequate
-ATT_ALLOW_MS = {"kick": 2.5, "snare": 0.5, "hat": 0.5}     # beat_hits.py: a kick / 808 attack is measured to +-2.5 ms, a snare / hat to +-0.5 ms (synthetic truth);
+ATT_ALLOW_MS = {"kick": 3.3, "snare": 0.5, "hat": 0.5}     # beat_hits.py: a kick / 808 attack is measured to +-2.5 ms on average but up to 3.3 ms
+                                   # (a soft 5 ms-ramp kick; an 808 sine scatters more, std 3.2), a snare / hat to +-0.5 ms (synthetic truth);
                                    # a hit counts as off its grid line only beyond BAR_MS plus that (an 808's own scatter is not the grid's fault)
 BETTER = 1.3                       # R of another tempo / R of the given one from which the given one is refused
 SPAN = 0.015                       # the tempo cross-check scans the BPM given +-1.5 %
@@ -221,7 +222,7 @@ e_ms = e_out * 1000
 med = float(np.median(e_ms))
 mad = 1.4826 * float(np.median(np.abs(e_ms - med)))
 beyond = share_beyond(e_out)
-jw = int(np.argmax(np.abs(e_out) - allow))
+jw = int(np.argmax(np.abs(e_out)))                  # the worst offset itself, not the offset that most exceeds the accuracy allowance
 print("grid residual over ALL %d strong hits (%g bpm, BEAT0 %.4f): median %+.1f ms, MAD %.1f ms, %.0f %% beyond %.1f ms (+%.1f ms for a kick / 808 attack, "
       "the accuracy of its measure), worst: track beat %.2f (%.3f s, %s) %+.1f ms" % (
           len(th), BPM_out, B0_out, med, mad, 100 * beyond, BAR_MS, ATT_ALLOW_MS["kick"], (th[jw] - B0_out) / PER_out, th[jw], kinds[jw], e_ms[jw]))

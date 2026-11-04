@@ -81,6 +81,12 @@ for r0, r1 in ranges:
     if r1 <= T.R0 or r0 >= T.R1:
         raise SystemExit("range %g .. %g lies outside the video (beats %g .. %g)" % (r0, r1, T.R0, T.R1))
 mix, fx, game = load("mix.wav"), load("stem_sfx.wav"), load("stem_game.wav")
+# The reference style's audio.py writes the stems at full level and mix.wav at HEADROOM (2 dB down at its default 0.8), so a raw
+# stem would look 2 dB brighter than the mix it belongs to; the house audio.py writes every file at HEADROOM. Scale the stems to
+# the level mix.wav was written at, so the three rows compare like with like.
+REF = "view" in T.SEGS[0]                                        # the reference style's S() has a view (preflight.py tells them apart the same way)
+SCALE = getattr(T, "HEADROOM", 0.8) if REF else 1.0
+fx, game = fx * SCALE, game * SCALE
 KILL_BEATS = [h for h, lv, i in getattr(T, "HITS", [])]          # musical beats of the kills (SYNC 2): where the gunshots sound
 MARKS = []                                                        # the song's own attacks, as (timeline beat, colour)
 if os.path.exists(T.MUSIC):

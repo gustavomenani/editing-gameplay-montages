@@ -1,7 +1,37 @@
+# Python / projetos
 __pycache__/
 *.pyc
+*.pyo
 venv*/
 _editor*/
+
+# mídia do projeto (clipes, música, masters, prévias, frames interpolados)
 *.mp4
+*.mov
+*.mkv
 *.flac
 *.wav
+*.aiff
+*.m4a
+*.mp3
+store/
+src/
+pts/
+*.jpg.rejected
+*.rejected.mp4
+
+# pastas de trabalho/auditoria (nunca vão pro repositório)
+.audit/
+_audit*/
+_fix/
+_push/
+_scratch/
+*.log
+
+# arquivos de sistema/editor
+Thumbs.db
+desktop.ini
+.DS_Store
+*.bak
+*.orig
+*.rej

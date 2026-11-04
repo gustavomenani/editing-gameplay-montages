@@ -72,12 +72,21 @@ def alignment(VID, T_=None, **kw):
     return None
 
 
+def accent_frames():
+    """Output frames the timeline deliberately shows instead of the source frame. None in the house style: its accents (the muzzle flash, the
+    exposure pop, the punch) change the look of the frame, not which source frame it shows, so the gate judges every flagged frame on the footage."""
+    return set()
+
+
 def faithful(VID, frames, T_=None):
-    """Does the master show, around each output frame of `frames` (the jumps / stalls analyze() flagged), the source frames the timeline asks for?
+    """Does the master show, at each output frame of `frames` (the jumps / stalls analyze() flagged), the source frame the timeline asks for?
     If it does, the jump or pause is in the footage itself (a real pause of the aim, a shot that did not kill): the render is faithful, the edit
     is not at fault. The window of the house style shows the middle 1280 px of the source (render.py WIN_SRC_W); the whole window, gray, 96x81,
-    normalised correlation against the clip's frames p_j + delta (delta -4 .. +4), frames n-2 .. n+2 of one take, not inside a transition.
-    -> {n: dict(ok, delta, score, scores)}; ok = the match at delta 0 is 0.6 or more and no offset of 2 or more beats it by 0.03."""
+    normalised correlation against the clip's frames p + delta (delta -4 .. +4), p = the source frame the timeline asks for at n. The frames
+    n-2 .. n+2 of one take, not inside a transition, are only the context of the read: they cannot outvote frame n (a mean over them let four
+    correct neighbours hide a one-frame stall, and the gate then passed a stutter as gameplay).
+    -> {n: dict(ok, delta, score, scores)}; ok = the master's OWN frame n matches at delta 0 with 0.6 or more and no offset of 2 or more beats
+    it by 0.03. A flat picture gives ok False: not measurable."""
     global T
     T = T_ if T_ is not None else (T or preflight.timeline())
     import clipio
@@ -102,7 +111,8 @@ def faithful(VID, frames, T_=None):
                 break
             if j in js:
                 v = cv2.resize(cv2.cvtColor(fr[WIN_Y:WIN_Y + WIN_H], cv2.COLOR_BGR2GRAY), (96, 81), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
-                flat = flat or float(v.std()) < 3.0
+                if j == 0:
+                    flat = float(v.std()) < 3.0               # the flagged frame itself: a black / one-colour picture has nothing to match
                 zm.append(z(v))
         s = T.SEGS[i]
         pj = [float(s["map"](T.frame_beat(n + j))[0]) for j in js]
@@ -117,11 +127,12 @@ def faithful(VID, frames, T_=None):
             continue
         zs = [z(cv2.resize(cv2.cvtColor(cv2.cvtColor(a[:, 320:1600], cv2.COLOR_RGB2BGR), cv2.COLOR_BGR2GRAY), (96, 81), interpolation=cv2.INTER_AREA).astype(np.float32).ravel())
               for a in src]
-        sc = {}
+        t0 = js.index(0)
+        sc = {}                                            # frame n alone, not the mean over its neighbours
         for dl in range(-4, 5):
-            c = [float(zm[t] @ zs[int(round(pj[t])) + dl - lo]) for t in range(len(js)) if 0 <= int(round(pj[t])) + dl - lo < len(zs)]
-            if len(c) == len(js):
-                sc[dl] = float(np.mean(c))
+            q = int(round(pj[t0])) + dl - lo
+            if 0 <= q < len(zs):
+                sc[dl] = float(zm[t0] @ zs[q])
         if not sc:
             out[n] = dict(ok=False, delta=0, score=0.0, scores={})
             continue

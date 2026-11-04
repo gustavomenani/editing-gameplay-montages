@@ -27,7 +27,11 @@ def read(clip, j, what):
                  f"python ranges.py && python prep.py ranges.json builds it (check with python check_store.py)")
     if not rifeutil.is_jpeg_complete(f):
         sys.exit(f"repair.py: {f} is truncated or damaged: delete it, run  python prep.py ranges.json  to build it again, then repair.py")
-    return cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+    im = cv2.imread(f)
+    if im is None:                                          # a whole FFD9 tail does not prove the picture decodes: imread returns None
+        sys.exit(f"repair.py: {f} does not decode (a damaged JPEG that still ends in FFD9): python check_store.py --delete removes it, "
+                 "python prep.py ranges.json rebuilds it, then run repair.py again")
+    return cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
 
 
 jobs = [parse(a) for a in sys.argv[1:]]
@@ -53,8 +57,8 @@ for clip, j in jobs:
             out = tween(f0, f1, (k - k0) / 32.0, tag=(clip, j))
             rifeutil.write_jpg(path, cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
             n += 1
-    # check: the rebuilt frame must now differ from both neighbours
-    mid = cv2.imread(f"store/{clip}/{j * 16:08d}.jpg").astype(np.int16)
-    a = cv2.imread(f"store/{clip}/{k0:08d}.jpg").astype(np.int16); b = cv2.imread(f"store/{clip}/{k1:08d}.jpg").astype(np.int16)
+    # check: the rebuilt frame must now differ from both neighbours (read through read(): a store file that does not decode stops here instead of raising)
+    mid = read(clip, j, "the rebuilt frame").astype(np.int16)
+    a = read(clip, j - 1, "the frame before it").astype(np.int16); b = read(clip, j + 1, "the frame after it").astype(np.int16)
     print(clip, j, "rewrote", n, "sub-frames; rebuilt frame vs previous %.2f, vs next %.2f" % (np.abs(mid - a).mean(), np.abs(mid - b).mean()))
 rifeutil.finish()

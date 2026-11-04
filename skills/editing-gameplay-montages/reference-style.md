@@ -14,7 +14,8 @@ Worked example: `scripts/refstyle/timeline_ref_example.py` (a 130 BPM trap song,
 folder itself, with the footage, is not published). It is also the drafter's template; its own entries predate the
 model edit (4-frame leads, `post()` slow motion, intro shots without kills).
 Setup: pipeline.md, "Setup" (the standard scripts, then `scripts/refstyle/` over them, then
-`cp timeline_ref_example.py timeline.py`). `scripts/refstyle/README.md` lists what in those scripts
+`[ -e timeline.py ] || cp timeline_ref_example.py timeline.py` - never overwrite a `timeline.py` that already holds an edit).
+`scripts/refstyle/README.md` lists what in those scripts
 belongs to the worked example only, and the standard tools this style does not use.
 
 ## Reading the reference (you cannot watch it)
@@ -227,9 +228,10 @@ none of its traits was used (a reference that changes nothing is not followed).
 
 ## Vertical frame (`FRAME = "vertical"`)
 
-The usual reference is a vertical TikTok edit. Set `FRAME = "vertical"` in the music block of `timeline.py`
-(default `"horizontal"`); nothing else changes in the workflow. Output 1080x1920 at 60 fps with the same cuts,
-blur-in kinds and timing, slow motion, lyric words, luma fade and cover.
+The usual reference is a vertical TikTok edit, and vertical is what `draft_ref_timeline.py` writes by default. Set
+`FRAME = "vertical"` in the music block of `timeline.py` (a hand-written timeline that omits FRAME is horizontal:
+that is `frame.py`'s fallback, not the drafter's default); nothing else changes in the workflow. Output 1080x1920 at
+60 fps with the same cuts, blur-in kinds and timing, slow motion, lyric words, luma fade and cover.
 
 - **Framing.** A vertical reference made from horizontal recordings fills the frame by cropping to a third of
   the game width: the standing zoom the user rejected ("voce deixou um zoom no video todo"). So the whole 16:9
@@ -302,7 +304,8 @@ Raw ShadowPlay recordings hold menus, deaths, other windows. Put EVERY recording
    short, that file is reported FAILED, no json is written (a cached json from a short decode is not trusted) and the
    script exits 1 after the other files.
 2. **Shot frame K** = the frame where the HUD ammo counter (x 1262, y 998, 84x44) changes, in any digit colour (it
-   turns red at low ammo), 5 to 12 frames before the feed row (usually 6 to 10): `mykills.py` writes `kills.json` and
+   turns red at low ammo - a white-only match misses the low-magazine counter), 4 to 12 frames before the feed row
+   (usually 6 to 10): `mykills.py` writes `kills.json` and
    `gal_NN.jpg`, and each entry carries `how`, `conf` and `verified`: `ammo` / `flash` = K measured on the pictures
    (conf `high` when the step and the flash are on K, `medium`), `ammo-loose` (several bullets) and `guess` (counter
    unreadable: feed - 7 frames) are NOT verified and the drafters refuse them. `strip.py clip a b` shows every frame
@@ -356,7 +359,9 @@ Procedure (in the project folder; `$PY` = venv311; the separation and alignment 
    (`[beat_in, beat_out, "WORD", style]`), `lyrics/cue_audit.json` (the flags: ambiguous, unverified, weak, ctc-far,
    models-apart, unstable), `lyrics/sync_N.jpg` and a zoom panel per flagged word, then runs `lyrics_audit.py`.
    Options: `--red=A:B` (red beat ranges, default the intro before beat -0.5), `--last-end BEAT` (the last word
-   leaves before the final kill), `--adv` (default 0: the cue IS the attack), `--shifts`, `--redo`, `--force`.
+   leaves before the final kill), `--adv` (default 0: the cue IS the attack), `--redo`, `--force`. The per-model
+   `--shifts` (how many times each alignment model is re-run on a 2.5 ms-shifted stem) belongs to
+   `lyrics_ctc_align.py`, not to `lyrics_sync.py`.
    Stem and alignment are cached: a re-run after a `lyrics.txt` fix takes seconds.
 4. Read its table (word, chosen beat, aligned beat, difference in ms, how, how far the two models were apart) and its
    CHECK list. If the models put a word over 0.35 s apart it stops: the typed words do not match the singing there
@@ -480,8 +485,8 @@ Needs a reference-style project (the tools use its renderer and lettering; the h
 
 The plate is darkened and the title set in the video's lettering on the exact centre, in capitals, kept
 inside the middle 800 px so a vertical centre crop keeps it (a long title shrinks: use the short form).
-Title only: the song title unless the user names one. 1920x1080 JPG beside the clips. `cover.py` refuses
-to overwrite an existing file.
+Title only: the song title unless the user names one. The JPG follows `FRAME`: 1080x1920 in the vertical edit (the
+default), 1920x1080 horizontal. `cover.py` refuses to overwrite an existing file.
 
 ## Costs (GTX 1650, Ryzen 5 5500)
 

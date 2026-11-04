@@ -13,7 +13,8 @@ usage: python find_kills.py c3              whole clip
    The sheet decides.
 Then write the confirmed frames to banners.json for kill_table.py:  {"c3": [133, 292, 556, 1187], ...}
 
-Geometry is the 1920x1080 Valorant HUD (scaled for other sizes). Other games need their own regions."""
+Geometry is the 1920x1080 Valorant HUD, scaled for other sizes: x and w by the frame width, y and h by its height.
+Other games need their own regions."""
 import subprocess, sys
 import numpy as np
 import cv2
@@ -23,9 +24,9 @@ from ff import FF
 clip = sys.argv[1]
 t0 = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
 t1 = float(sys.argv[3]) if len(sys.argv) > 3 else float(clipio.pts(clip)[-1])
-k = clipio.SH / 1080.0
-BIG = [int(round(v * k)) for v in (220, 220, 850, 756)]          # w, h, x, y: banner with some surroundings (sheets)
-ICON = [int(round(v * k)) for v in (50, 50, 935, 841)]           # the badge itself (pixel counts)
+kx, ky = clipio.SW / 1920.0, clipio.SH / 1080.0                  # a height ratio on x fitted only 16:9: a 4:3 or anamorphic source needs both
+BIG = [int(round(v * s)) for v, s in zip((220, 220, 850, 756), (kx, ky, kx, ky))]     # w, h, x, y: banner with some surroundings (sheets)
+ICON = [int(round(v * s)) for v, s in zip((50, 50, 935, 841), (kx, ky, kx, ky))]      # the badge itself (pixel counts)
 
 # ---------------------------------------------------------------- 1. sheets for the eyes
 raw = subprocess.run([FF, "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}", "-i", clipio.path(clip), "-map", "0:v:0",

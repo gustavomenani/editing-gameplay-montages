@@ -37,7 +37,7 @@ def filters(volume, limit):
 
 
 def remux(path, volume, mix, limit):
-    tmp = path[:-4] + ".peak.tmp.mp4"
+    tmp = os.path.splitext(path)[0] + ".peak.tmp.mp4"
     r = subprocess.run([FF, "-v", "error", "-y", "-i", path, "-i", mix,
                         "-af", filters(volume, limit),
                         "-map", "0:v", "-map", "1:a", "-map_metadata", "0", "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",

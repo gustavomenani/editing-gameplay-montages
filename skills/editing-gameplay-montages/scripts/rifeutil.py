@@ -5,7 +5,8 @@ must keep "rife-v4.25" (or whichever version) in it.
 
 Environment:
   RIFE_GPU    Vulkan device number, default 0 (a laptop with an integrated and a dedicated GPU may list the dedicated one
-              as 1: the lines the binding prints when it starts name them). RIFE_GPU=-1 (or "cpu") runs on the CPU, see below.
+              as 1: the lines the binding prints when it starts name them). RIFE_GPU=-1 (or "cpu", or any negative number:
+              they are typos for -1 and are clamped to it) runs on the CPU, see below.
   RIFE_MODEL  full path of the model folder (the one that holds flownet.bin), default models/rife-v4.25.
 
 CPU fallback (RIFE_GPU=-1): works with the same network (the pictures differ from the GPU's in the last digits), but slow. Measured with a 1344x1080 frame pair on a
@@ -73,9 +74,10 @@ def gpu_setting():
     if raw == "cpu":
         return -1
     try:
-        return int(raw)
+        gpu = int(raw)
     except ValueError:
         die(f"RIFE_GPU={raw!r} is not a number: use the Vulkan device number (0, 1, ...), or -1 for the CPU (about 15 times slower).")
+    return max(-1, gpu)                                # -2, -5 ... are typos for -1: the binding reads them as a device number
 
 
 def load(name=DEFAULT):

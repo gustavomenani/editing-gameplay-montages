@@ -4,6 +4,8 @@
 # uso, na pasta do repositório clonado:
 #     bash install.sh              copia a skill e mostra o que falta, com o comando exato do winget
 #     bash install.sh --instalar   além disso, roda o winget para instalar o que faltar (Git, uv, ffmpeg)
+# Sai com 0 quando nada obrigatório falta e com 1 quando falta algo (a mesma regra do doctor.py), então dá para
+# conferir o computador de dentro de um script.
 #
 # 1. Copia skills/editing-gameplay-montages para ~/.claude/skills/ (cria a pasta). Se já existe uma cópia, ela é guardada antes
 #    em editing-gameplay-montages.backup-<data> (pode ter anotações que o Claude escreveu) e o caminho é mostrado.
@@ -59,8 +61,9 @@ ok "skill instalada em: $DESTINO ($N arquivos, modelo do RIFE conferido)"
 # ------------------------------------------------------------------ 2. pré-requisitos
 titulo "O que o computador precisa"
 
-# o primeiro arquivo que existe entre os padrões (globs) dados
-primeiro() { local p f; for p in "$@"; do for f in $p; do [ -f "$f" ] && { echo "$f"; return 0; }; done; done; return 1; }
+# o primeiro arquivo que existe entre os padrões (globs) dados. IFS de uma linha só: os globs (uv*, Gyan.FFmpeg*) continuam
+# expandindo, mas um caminho com espaço ("C:\Program Files\...") não é partido em palavras e pode ser encontrado
+primeiro() { local p f IFS=$'\n'; for p in "$@"; do for f in $p; do [ -f "$f" ] && { echo "$f"; return 0; }; done; done; return 1; }
 LOCAL_APP="${LOCALAPPDATA:-$HOME/AppData/Local}"
 PF="${ProgramFiles:-C:\\Program Files}"
 if command -v cygpath >/dev/null 2>&1; then LOCAL_APP=$(cygpath -u "$LOCAL_APP"); PF=$(cygpath -u "$PF"); fi
@@ -203,4 +206,10 @@ echo "Próximos passos:"
 echo '  1. Abra o Claude Code numa pasta e peça o vídeo (ex.: "faça um montage com os clipes de C:\Users\...\Videos\valorant e a música X").'
 echo "  2. Quando o projeto tiver o venv (a skill cria: pipeline.md, Setup), confira tudo de verdade, inclusive o RIFE na placa:"
 echo "       ./venv311/Scripts/python doctor.py        (dentro da pasta _editor do projeto)"
+# mesma regra do doctor.py: 0 = tudo encontrado, 1 = falta algo. Depois de --instalar, feche e abra o terminal e rode de novo
+# para conferir (o PATH só atualiza em terminais novos)
+if [ "${#FALTAM[@]}" -gt 0 ]; then
+  echo "install.sh: saindo com código 1: falta ${FALTAM[*]} (0 = nada falta, 1 = falta algo)" >&2
+  exit 1
+fi
 exit 0

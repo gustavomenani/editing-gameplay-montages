@@ -17,7 +17,7 @@ so keep tiles at 100 px or more with large labels (the scripts do).
 | `$PY kverify.py` (any time after `kills.json`; `kverify.py timeline.py` once it exists) | every kill `verified`: the ammo step or the muzzle flash starts ON K and nothing on K-1. `CORRECT` names the sure K (use it); `SUSPECT` / `not measurable` (replay camera, weapon hidden): read the `kv_NN.jpg` row (tiles K-3..K+3: green = ammo step, yellow = flash, cyan = both). The gate repeats it (`kill-frame`). Moved by one frame, no K passed as verified in the test on 110 kills; it does not prove K is the killing shot of a spray |
 | `$PY kill_rank.py --check` (after the timeline is written) | no ERROR: `hidden`, `not-yours`, `duplicate` (the same source moment twice, also across a DVR and its trim), `wrong-shot` (K is not the shot that killed), `k-after-row` (K after the feed row: a follow-up shot). WARN `weak-shot` / `unverified`: look at the frames. Measured: on the worked example it names the kill hidden behind a wall and one death row taken for a kill; on another accepted edit, a spray's first shot and a follow-up shot used as K |
 | `$PY deathstrip.py ds.jpg` (after the timeline is written) | every enemy's body is down on a green tile (a tile the edit shows), and no "WARNING: ... the death is cut short" line. A red tile before the fall: raise that kill's `upto` (or give the take more room) and draft again |
-| the drafter's statistics block | close to the model edit (model-edit.md section 9): lead 14 frames on every take, deaths shown on every take, fastest frame at most 1.02x, kills per 10 s and gaps fitted to the song's tempo (model-edit.md section 3) |
+| the drafter's statistics block | close to the model edit (model-edit.md section 9): lead 14 frames on every take, deaths shown on every take, fastest frame at most 1.02x in the default style (the house style squeezes its blur-ins to 1.6x and reaches 4.6x; a delivery with `MAX_SPEED = None` is judged by the user's request, not by this number), kills per 10 s and gaps fitted to the song's tempo (model-edit.md section 3) |
 | `$PY render.py N N+1 x.jpg` on a kill, a transition middle, a slow-motion frame, the first and last second | framing right, window and backdrop as intended, nothing black, torn or doubled |
 | `$PY render.py A B x.jpg 2` across a transition | both clips visible mid-way, smooth smear, no stepped copies |
 | `$PY audio.py` | house style: each kill's gunshot measured to the sample and placed on its hit (it stops on a kill it cannot measure); `mix peak` up to 2.0 is fine, the files are written at half level. Default style: read the closing count of measured, donor, clip-offset, edit-median and silent gunshots (reference-style.md, "Sound"); `mix peak` below 1.0 at the written level (`HEADROOM`; worked example 0.94 at 0.8, model edit 0.785 at 0.5), the script stops above it |
@@ -44,7 +44,10 @@ inverted monochrome picture (nearly black for a bright scene, nearly white for a
 fault, and not measurable by the flash: judge its flash on the next tiles. There is no `+1` case: the flash is whole
 on the shot frame and absent on the one before, because those two frames are read at the exact source position.
 
-Run it again on the upload copy: that is the file the user gets.
+Run it again on the upload copy: that is the file the user gets. `check.py` is not part of `deliver.sh` (a full decode of the copy takes
+minutes, and the picture is the master's, re-encoded): `deliver.sh` runs `peakguard.py` and then `gate.py --sync-only` on the copy, which
+is the audit that catches a re-encode that moved the picture or the sound. Run `$PY check.py out.mp4` by hand when the copy's sharpness
+or smoothness is in doubt.
 
 ### A stalled frame: what is it?
 
@@ -110,32 +113,51 @@ left (each line says what and how to fix it).
 
 - ERROR (refuse): an old timeline (no `SYNC = 2`, `timeline-old`); timeline problems and fast-forward (preflight);
   file against timeline (size, 60 fps, frame count, duration, audio at 48 kHz, audio as long as the picture); a
-  master rendered from another `timeline.py` (`run.sh` stamps `timeline_sha1` into it); frozen frames; stalls and
-  jumps the master does not reproduce from the footage; kill sync (the master must show the source frames the
-  timeline asks for around each kill: the 6 frames before the shot when the take started 12 frames or more earlier, as
-  every drafted take does, so no punch, burst or inverted frame disturbs the measure; after the shot for a take cut a
-  few frames before it); decoded peak above -0.5 dBFS; `mix.wav` / `audio_report.json` made for another
-  `timeline.py`; a kill without gunshot (default style); kills hidden, not the player's, duplicated or on the wrong
-  shot (`kill_rank.py`); a K that `kverify.py` corrects or suspects (`kill-frame`); a lyric word not in `lyrics.txt`;
-  the sync audit's errors (next section); no `MAX_SPEED` while frames play above 1.25x (`no-ceiling`: waive it only
-  for a user who asked for velocity); a check that crashed (never waivable).
+  master rendered from another `timeline.py` (`run.sh` stamps `timeline_sha1` into it); the picture or the sound
+  starting late (`pts-gap`: the first video packet at pts 0 and both tracks starting together, within a frame: an
+  `-itsoffset`, an `elst` / edit list or a mux offset leaves a file that is otherwise perfect); frozen frames;
+  stalls and jumps the master does not reproduce from the footage; kill sync (the master must show the source
+  frames the timeline asks for around each kill: the 6 frames before the shot when the take started 12 frames or
+  more earlier, as every drafted take does, so no punch, burst or inverted frame disturbs the measure; after the
+  shot for a take cut a few frames before it); decoded peak above 0 dBFS (`peakguard.py` keeps the delivered copy below -0.5); `mix.wav` / `audio_report.json` made
+  for another `timeline.py`; a kill without gunshot (default style); kills hidden, not the player's, duplicated, on
+  the wrong shot or 2-12 frames after their feed row (`kill_rank.py`); a K that `kverify.py` corrects or suspects
+  (`kill-frame`); a lyric word not in `lyrics.txt`; the sync audit's errors (next section); no `MAX_SPEED` while
+  frames play above 1.25x (`no-ceiling`: waive it only for a user who asked for velocity); a check that crashed
+  (never waivable).
+- A stall or jump is the gameplay WARN only when the master's OWN frame is the source frame the timeline asks for
+  (a mean over the 5 frames around it let correct neighbours hide one bad frame, and a stutter passed as gameplay)
+  and, for a stall (an output frame that repeats the one before it), only when the timeline's own map repeats the
+  source position there (`p(n) == p(n-1)`: the footage is frozen). A real pause of the aim that the map moves past (two
+  identical pictures from two different source frames) is therefore refused; `cadence.py` (the fix line) says whether
+  the source really paused, and `ACCEPT=stall` waives it. The reference style's inverted level-3 impact frame is an
+  accent, not a wrong frame: it stays a WARN.
 - WARN (print and pass): jumps that are in the footage, one frame of sync, loudness outside -14..-7 LUFS, gunshot
   placed with an offset that was not measured, kills not verified (`kill-frame-unmeasured`, and `kills-unverified`
   when `kverify.py` or `kill_rank.py` is missing from the project). EVERYTHING the audit could not measure is a WARN
   that lists the events, never a pass: `gunshot-unmeasured`, `bump-unmeasured`, `fx-unmeasured`, `flash-unmeasured`,
-  `cut-unmeasured`, `word-unverified` (cue starts not verified against the singing), `grid-unmeasured`, and
-  `kill-audio-double` (the placed gunshot is on its hit but a louder attack follows it: listen).
+  `cut-unmeasured`, `word-unverified` (cue starts not verified against the singing), `grid-unmeasured`,
+  `sync-unmeasured` (the kill sync could not be measured for those kills: `check.py` returns every kill, an
+  unreadable one with `measurable: false`, so none can disappear from the list), and `kill-audio-double` (the placed
+  gunshot is on its hit but a louder attack follows it: listen).
 - A problem the user chooses to accept is waived per code only: `ACCEPT=<code> bash deliver.sh ...`
   (`$PY gate.py --codes` lists them); it is written to `LEIAME.md` with the date. Say it in the report. NEVER
   waivable (an ERROR stays, `--accept` refuses the code): `av-offset`, `av-drift`, `frame-count`, `cut-frame`,
   `pts-gap`, `timeline-old`, `check-failed`. The gate runs `kverify.py` with the game's profile: `GAME` in
   timeline.py, the one `"game"` of the `kills.json` entries (`kills_auto.py` writes it), `$KVERIFY_GAME`, else
   `valorant` (never a `"game"` key in clips.json: `ingest.py` reads every key there as a clip).
-- `--json` prints the list; `--no-pixels` skips the decoding; `--table` also prints the sync audit's table; `--deep`
+- `--json` prints the list; `--no-pixels` skips every check that decodes pictures (the picture checks, the kill sync and `kverify.py`:
+  the timeline, file, sound against the song, audio report, kills and lyrics checks still run, and the picture events that could not be
+  measured are WARNed, never dropped); `--table` also prints the sync audit's table; `--deep`
   renders about 10 frames again and compares them with the file (1-2 minutes more). 15 s to 2 min.
 - `$PY gate.py --sync-only FILE` runs ONLY the sync audit, on one file: `deliver.sh` runs it on the UPLOAD COPY after
   `peakguard.py`, the file that leaves (it needs `timeline.py`, `src/`, the song and, for the sound checks,
-  `audio_report.json`). Exit 0 = no ERROR; 1 = an ERROR (the copy is renamed `*.rejected.mp4`); 2 = a bad call.
+  `audio_report.json`). Exit 0 = no ERROR; 1 = an ERROR (the copy is renamed `*.rejected.mp4`); 2 = a bad call (a code that does
+  not exist, or a missing FILE). A `peakguard.py` failure renames the copy the same way, so nothing unverified is ever left under
+  the upload name.
+- `deliver.sh` refuses a master older than `timeline.py` before it encodes (one line, no ffmpeg run): the copy is audited against
+  the current timeline, so it would be rejected after the whole encode. The gate keeps it a WARN (`master-older`: an mtime alone
+  does not prove the picture changed); the deliverer, whose copy is measured anyway, treats it as the refusal it becomes.
 - Earlier measurement (before SYNC 2, on the worked example and the house example): no false ERROR; planted faults
   (fast hand edit, silent kill, truncated master, +5 dB, a duplicated frame, a timeline changed after `audio.py`) were
   each caught with their code. A kill-sync measure taken AFTER the shot gave a false ERROR on a vertical model-style
@@ -151,7 +173,7 @@ timeline). An event that cannot be measured is LISTED as such, never counted as 
 
 | Stage | What it measures | Code and severity |
 |---|---|---|
-| S1 container | video pts on the 1/60 s lattice, frame count = `N_FRAMES` | `pts-gap` (WARN under 1 ms of drift, ERROR above), `frame-count` |
+| S1 container | video pts on the 1/60 s lattice, frame count = `N_FRAMES`; the START of the tracks: first video pts at 0, both tracks starting within a frame | `pts-gap` (WARN under 1 ms of drift, ERROR above; ERROR when the picture starts late or the sound does not start with it), `frame-count` |
 | S2 audio vs song | the decoded audio (file clock) against the song at `MUSIC_T0`: band-passed cross-correlation, the lag in samples, then 2 s windows (min, max, slope) | `av-offset` (ERROR above 1 ms, WARN above 0.25), `av-drift` (the lag moves by more than 1 ms), `audio-unmatched` |
 | S3 gunshots | for a kill `audio_report.json` says was placed on its measured onset (`measured`), the clip's OWN 60 ms excerpt is matched-filtered against the master's song-free residual (the song, shifted by the S2 lag with its gain fitted, is subtracted) within +-20 ms of the hit; for others the loudest attack of the residual is compared with the hit | `kill-audio`: a placed shot more than 1 ms from its hit, or missing from the mix (match below 0.3): ERROR; house `heard` shots by the attack detector: WARN from 2 ms, ERROR above 4 ms; any other state WARN above 8.3 ms; `kill-audio-double` (WARN: a louder attack more than 15 ms after the placed one); `gunshot-unmeasured` (WARN) |
 | S4 accents | the frame of the exposure pop and of the burst (the first frame with a real share of the window's largest RGB split) of each kill, and of each bump. A level-3 kill shows the INVERTED frame on the shot frame (that is its impact; no split can be seen on it) and the burst shows from the NEXT frame. A kill on a cut / blur-in, and bumps inside `LUMA_IN` / `LUMA_FADE`, the opening fade, near a cut or inside a kill's accent window (nk-1..nk+6) are not measurable | `fx-frame`, `bump-frame` (must be on `nearest_frame(shown beat)`, bumps on `nearest_frame(b) - HIT_LEAD`); `fx-unmeasured`, `bump-unmeasured` (WARN) |

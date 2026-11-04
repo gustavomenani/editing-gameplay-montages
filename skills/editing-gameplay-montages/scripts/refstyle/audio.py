@@ -108,6 +108,10 @@ def music():
         sys.exit("audio.py: the song does not cover the video:\n  - " + "\n  - ".join(err))
     a = int(round(T.MUSIC_T0 * SR))
     y = m[a:a + NS].copy()
+    if len(y) < NS:                             # the preflight formula can be a few hundred samples optimistic; a ValueError from the fade below is not a message
+        sys.exit("audio.py: %s is too short for this edit: the mix needs the song from %.3f s to %.3f s (MUSIC_T0 = %.3f s, %.3f s of it) and only "
+                 "%.3f s are there: %.1f ms are missing at the end. Lower MUSIC_T0 / R1, or choose a M0 earlier in the track. Nothing was written."
+                 % (T.MUSIC, T.MUSIC_T0, T.MUSIC_T0 + NS / SR, T.MUSIC_T0, NS / SR, (len(m) - a) / SR, (NS - len(y)) / SR * 1000.0))
     if T.SWEEP:
         # close a low-pass over the music along T.SWEEP = [(beat, cutoff Hz), ...] and snap it open 4 ms before
         # the last point (in the house example: through the bullet time, opening on the last kill)
@@ -129,8 +133,10 @@ def music():
         xf = int(0.003 * SR)
         out[-xf:] = out[-xf:] * np.linspace(1, 0, xf)[:, None] + y[b1 - xf:b1] * np.linspace(0, 1, xf)[:, None]
         y[b0:b1] = out
-    fade_in = getattr(T, "FADE_IN", None)                # seconds: a squared fade-in of that length (a tight edit: 0.45, under the picture's fade-in); absent: 0.05 s linear
-    fi = int((fade_in or 0.05) * SR)
+    # A de-click, not a fade: the song must land sample-exact on its hits, and a 50 ms fade-in muted a hit on output sample 0 and cost
+    # -15.6 dB at 8.3 ms (half a frame, the placement bar). T.FADE_IN (seconds, squared) still asks for a real fade, e.g. under the picture's.
+    fade_in = getattr(T, "FADE_IN", None)
+    fi = int((fade_in or 0.005) * SR)
     y[:fi] *= (np.linspace(0, 1, fi) ** (2 if fade_in else 1))[:, None]
     y *= (1 - smooth((rr - T.FADE_OUT[0]) / (T.FADE_OUT[1] - T.FADE_OUT[0] - 0.05)))[:, None].astype(np.float32)
     return y
@@ -461,17 +467,19 @@ if __name__ == "__main__":
     # booms needs 0.5-0.7: HEADROOM = 0.5 in timeline.py); run.sh / deliver.sh / peakguard.py give it back with
     # volume = 1.18 / HEADROOM in front of the limiter (master_chain()). GAME_LEVEL = the gunshot level (0.60).
     mix = (0.84 * m + getattr(T, "GAME_LEVEL", 0.60) * g + fx) * HEADROOM
-    for name, x in (("stem_music", m), ("stem_game", g), ("stem_sfx", fx), ("mix", mix)):
-        with wave.open(f"{name}.wav", "wb") as w:
-            w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
-            w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+    # The peak is checked BEFORE anything is written: a failed run must not leave a clipped mix.wav behind that a later
+    # deliver.sh / mux would pick up as if it were good.
     print("mix peak %.3f  rms %.3f | music peak %.3f | game peak %.3f rms %.3f | sfx peak %.3f" % (
         np.abs(mix).max(), np.sqrt((mix ** 2).mean()), np.abs(m).max(), np.abs(g).max(), np.sqrt((g ** 2).mean()), np.abs(fx).max()))
     if np.abs(mix).max() > 1.0:
         sys.exit("audio.py: the mix peaks at %.2f even at HEADROOM %.2g, so it would clip before the limiter (the song is very loud, or the "
                  "gunshots / thumps / booms are hot): set HEADROOM = 0.5 (or lower) in timeline.py (run.sh, deliver.sh and peakguard.py then apply "
-                 "volume = 1.18 / HEADROOM), or lower GAME_LEVEL, KILL_THUMP and the BOOMS gains, and run audio.py again"
+                 "volume = 1.18 / HEADROOM), or lower GAME_LEVEL, KILL_THUMP and the BOOMS gains, and run audio.py again. Nothing was written."
                  % (np.abs(mix).max(), HEADROOM))
+    for name, x in (("stem_music", m), ("stem_game", g), ("stem_sfx", fx), ("mix", mix)):
+        with wave.open(f"{name}.wav", "wb") as w:
+            w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
+            w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
     # How sure is each gunshot? A placed shot has its onset sample on the hit sample by construction (placed_ms = 0); what can be
     # wrong is the onset that was found: "measured" = the shot's own clean onset, "donor" = the shot_from donor's own clean onset,
     # "clip offset" / "edit median" = a median offset, NOT verified.

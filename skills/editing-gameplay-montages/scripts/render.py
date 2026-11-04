@@ -39,7 +39,7 @@ LIN = ((np.arange(256) / 255.0) ** GAMMA).astype(np.float32)
 SEGS = T.SEGS
 KF = [(T.nearest_frame(k), k, lv) for k, lv, _ in T.KILLS]                  # the frame every shot is SHOWN on, that frame's beat, the level
 PF = [(T.nearest_frame(b) - T.HIT_LEAD, wt) for b, wt in T.PULSES]          # a pulse (musical beat) is shown like a shot: HIT_LEAD frames before its hit
-PF = [(nf, T.frame_beat(nf), wt) for nf, wt in PF]
+PF = [(nf, T.frame_beat(nf), wt) for nf, wt in PF if nf >= 0]               # a pulse whose frame is before frame 0 is not shown at all (it would flash and zoom the opening)
 
 
 def sgn(n, j):
@@ -48,6 +48,27 @@ def sgn(n, j):
 
 
 ZOOM_A = {1: 0.12 * KZ, 2: 0.17 * KZ, 3: 0.21 * KZ}
+PUSH_REL = 0.6                       # beats a take's push-in takes to ease back out after its window ends: a push never leaves a standing zoom
+
+
+def push_windows(push):
+    """(beat a, beat b, amount, end) for every push window of a take: a window that another one continues (it starts at most PUSH_REL
+    beats after this one ends) is part of the same push, and the whole push is released after its last window. cam() uses `end`."""
+    out = []
+    for a, b, amt in push:
+        if b <= a:                                          # an empty window (preflight refuses it): nothing to divide by
+            continue
+        end, grew = b, True
+        while grew:                                         # the windows form a chain: follow it to the push's last window
+            grew = False
+            for a2, b2, _ in push:
+                if end - 1e-9 <= a2 <= end + PUSH_REL and b2 > end:
+                    end, grew = b2, True
+        out.append((a, b, amt, end))
+    return out
+
+
+PUSH = [push_windows(s["push"]) for s in SEGS]
 
 
 # ---------------------------------------------------------------- footage
@@ -74,6 +95,9 @@ class Store:
             sys.exit(f"render.py: {f} is cut off ({len(data)} bytes; a script stopped while writing it, or a full disk). "
                      "python check_store.py --delete removes the damaged files, python prep.py ranges.json rebuilds them.")
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:                                     # a whole FFD9 tail does not prove the picture decodes (a corrupt block, a bad copy):
+            sys.exit(f"render.py: {f} does not decode (a damaged JPEG that still ends in FFD9: a copy that was interrupted, a bad disk block). "
+                     "python check_store.py --delete removes the damaged files, python prep.py ranges.json rebuilds them.")
         lin = LIN[img[:, :, ::-1]]                           # RGB, linear light, float32
         self.cache[k] = lin
         if len(self.cache) > self.max:
@@ -121,7 +145,9 @@ class Store:
 
 # ---------------------------------------------------------------- camera
 def cam(i, u, n):
-    """Zoom / offset / roll of the virtual camera over segment i at beat u, inside output frame n (u is a sub-frame sample)."""
+    """Zoom / offset / roll of the virtual camera over segment i at beat u, inside output frame n (u is a sub-frame sample).
+    A push (s["push"]) rises over [a, b] and eases back out over PUSH_REL beats after the end of its push, so it never holds a crop on
+    the rest of the take (the user's rule: no standing zoom); PUSH holds the windows and where each one's push ends."""
     s = SEGS[i]
     z = ox = oy = th = 0.0
     for k, lv in s["kills"]:
@@ -136,9 +162,9 @@ def cam(i, u, n):
             z += A * (0.5 + 0.5 * math.cos(math.pi * min(1.0, x)))   # ease back out
         else:
             z += A                                              # finishers stay in
-    for a, b, amt in s["push"]:
+    for a, b, amt, end in PUSH[i]:
         if u > a:
-            z += amt * T.ease((u - a) / (b - a))
+            z += amt * T.ease((u - a) / (b - a)) * (1.0 - T.ease((u - end) / PUSH_REL))
     for a, b in s["skill"]:
         if a < u < b:
             z += 0.06 * math.sin(math.pi * (u - a) / (b - a)) ** 2

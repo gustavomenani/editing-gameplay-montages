@@ -1,6 +1,6 @@
 """Checks that turn the usual mistakes into one sentence that says what is wrong and what to do.
 
-`import preflight` (first import of a script) stops with a clear message when this Python has no numpy / cv2, i.e.
+`import preflight` (first import of a script) stops with a clear message when this Python has no numpy / cv2 / scipy, i.e.
 when it is not the project's venv. `preflight.timeline()` imports timeline.py and checks it before any hour of work
 is started on it; it returns the module. `python preflight.py` does the same check by hand (with the music).
 
@@ -8,8 +8,9 @@ timeline.py checks (all problems are listed at once, not only the first):
   CUTS_ON spelled right; LOOK (the edit options, look.py) has known options with values in range; the model edit's optional names (BUMPS,
   BOOMS, LUMA_IN, sound levels, IMPACT / ACC, segment white / shot_from) have the right shape and lie inside the video; every clip of the
   segments exists in src/ and has its pts/ table; anchor beats AND source frames strictly increasing; every kill inside its segment
-  and inside its clip; segments follow each other; FADE_OUT inside the video; with music=True the song covers R0..R1
-  (the one place that knows how long it is).
+  and inside its clip; every take's push / skill windows (two numbers with b > a, the push amount in 0 .. 0.6); the names a style's renderer
+  reads unconditionally (LUMA_FADE in the reference style, PULSES in the house style); segments follow each other; FADE_OUT inside the video;
+  with music=True the song covers the whole picture, MUSIC_T0 + N_FRAMES / FPS (the one place that knows how long it is).
 
 The timing contract (SYNC = 2; a timeline.py without it is refused with the way to update it):
   grid identities   FPS == 60, PER == 60 / BPM, FPB == FPS * PER, MUSIC_T0 == BEAT0 + (M0 + R0) * PER, N_FRAMES == round((R1 - R0) * FPB): audio.py reads
@@ -25,7 +26,7 @@ VIDEO = (".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts", ".flv", ".wmv")
 CUTS = ("bass", "kills")
 CUTS_HINT = {"graves": "bass", "grave": "bass", "baixo": "bass", "kill": "kills", "abates": "kills"}
 
-for _m in ("numpy", "cv2"):
+for _m in ("numpy", "cv2", "scipy"):                       # scipy: every drafter imports it through beat_hits
     try:
         importlib.import_module(_m)
     except ImportError as _e:
@@ -36,23 +37,58 @@ K_HELP = ("run `python kverify.py plan.json` (it measures the ammo step and the 
           "(or `kverify.py kills.json --update`), then set \"k_checked\": true on the plan entry")
 
 
+class _KillDB(dict):
+    """kills.json as {id: entry}; problem = why the file cannot verify a K (None when it was read as {id: object})."""
+    problem = None
+
+
+def _bad_kills(what):
+    """One-line refusal for a kills.json that is not {id: {clip, K, ...}}: names the file and the shape, and kill_table.json
+    when kill_table.py wrote one next to it (its {clip: [records]} table is not a kill list)."""
+    msg = ('kills.json is not a kill list: %s. It must be a JSON object of id -> entry, every entry an object like '
+           '{"clip": "c1", "K": 300, "how": "ammo", "conf": "high", "verified": true} (kills_auto.py writes it)' % what)
+    if os.path.exists("kill_table.json"):
+        msg += "; kill_table.json is kill_table.py's table, not the kills.json layout"
+    return msg
+
+
 def kills_db():
-    """kills.json of the project folder as a dict ({} when it is absent or unreadable): the one loader of both drafters' K rule"""
+    """kills.json of the project folder as a dict {id: entry} ({} when it is absent or unreadable): the one loader of both
+    drafters' K rule. A file that is not that shape returns an empty dict with `problem` set (k_check returns it), so a
+    malformed file cannot become an AttributeError inside a drafter."""
     import json
+    db = _KillDB()
     try:
         d = json.load(open("kills.json", encoding="utf-8-sig"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    except FileNotFoundError:
+        return db
+    except (OSError, ValueError) as e:
+        db.problem = _bad_kills("it cannot be read (%s: %s)" % (type(e).__name__, str(e)[:90]))
+        return db
+    if isinstance(d, dict) and all(isinstance(e, dict) for e in d.values()):
+        db.update(d)
+        return db
+    if isinstance(d, dict) and d and isinstance(next(iter(d.values())), list):
+        db.problem = _bad_kills("its values are lists (the {clip: [records]} layout kill_table.py wrote before)")
+    elif not isinstance(d, dict):
+        db.problem = _bad_kills("its top level is a %s" % type(d).__name__)
+    else:
+        db.problem = _bad_kills("its entries are not objects")
+    return db
 
 
 def k_check(db, k):
     """The K rule of both drafters (a K one frame off is 16.7 ms of desync between the shot and the drum). k = {"clip", "K"} and
     optionally "id" (K = the PLAN's K). -> the reason this K is unverified, or None when kills.json verifies it. Unverified (refused unless the plan entry says
-    "k_checked": true): no kills.json; no entry (by id, else clip + K, also the K that kverify.py corrected: "K_was"); the plan's K differs from the entry's;
+    "k_checked": true): no readable kills.json (absent, not JSON, not {id: entry}); no entry (by id, else clip + K, also the K that kverify.py corrected: "K_was");
+    the plan's K differs from the entry's; the target is covered ("hidden"); no shot was fired for it ("no_shot"); "verified" is false;
     the entry's how is not "ammo" / "flash" (ammo-loose, guess, none: an old entry); its conf is "low" / "guess"."""
+    if not isinstance(db, dict):
+        return getattr(db, "problem", None) or _bad_kills("its top level is a %s, not an object of entries" % type(db).__name__)
+    if any(not isinstance(e, dict) for e in db.values()):
+        return getattr(db, "problem", None) or _bad_kills("its entries are not objects")
     if not db:
-        return "there is no kills.json in this folder, so nothing verifies this K"
+        return getattr(db, "problem", None) or "there is no kills.json in this folder, so nothing verifies this K"
     kid, entry = k.get("id"), None
     if kid is not None:
         entry = db.get(str(kid))
@@ -67,6 +103,12 @@ def k_check(db, k):
         if entry.get("K_was") == k["K"]:
             return "kills.json id %s: kverify.py corrected this K (%s) to %s" % (kid, k["K"], entry.get("K"))
         return "the plan's K = %s differs from kills.json id %s (K = %s)" % (k["K"], kid, entry.get("K"))
+    if entry.get("hidden"):
+        return "kills.json id %s: the target is covered at the shot (hidden = true): nothing to see, do not build a take on it" % kid
+    if entry.get("no_shot"):
+        return "kills.json id %s: no shot of yours was fired for it (no_shot = true: an ability / knife kill, or not a gun kill)" % kid
+    if entry.get("verified") is False:
+        return "kills.json id %s: verified = false (K was not measured on the picture: run kverify.py, then set k_checked)" % kid
     how, conf = entry.get("how"), entry.get("conf")
     if how in ("ammo", "flash") and conf not in ("low", "guess"):
         return None
@@ -87,7 +129,9 @@ def duration(path):
 
 
 def music_problems(T, seconds=None):
-    """The song must cover timeline beats R0..R1. seconds = its length when already known (audio.py decoded it)."""
+    """The song must cover MUSIC_T0 .. MUSIC_T0 + N_FRAMES / FPS: that is what audio.py slices (y = m[a:a + NS], NS = round(N_FRAMES / FPS
+    seconds)), up to 1/60 s more than (R1 - R0) * PER, so the whole-frame rounding counts. seconds = its length when already known
+    (audio.py decoded it)."""
     err = []
     mus = getattr(T, "MUSIC", None)
     if not mus or not os.path.exists(mus):
@@ -96,14 +140,17 @@ def music_problems(T, seconds=None):
     dur = seconds if seconds is not None else duration(mus)
     if not dur:
         return [f"{mus} has no readable audio (ffprobe reports no duration): is it a damaged or empty file? Re-export it as FLAC / WAV / MP3 and run ingest.py --force --only music"]
+    if not (isinstance(T.PER, (int, float)) and not isinstance(T.PER, bool) and T.PER > 0):
+        return [f"PER = {T.PER!r} must be a number above 0 (seconds per beat: PER = 60.0 / BPM): grid_problems() reports it"]
     t0 = T.MUSIC_T0
-    t1 = t0 + (T.R1 - T.R0) * T.PER
+    t1 = t0 + T.N_FRAMES / T.FPS
     if t0 < -1e-3:
         err.append(f"R0 = {T.R0:g} starts {-t0:.2f} s before the beginning of the song (M0 = {T.M0}: timeline beat 0 is beat {T.M0} of the track): "
                    f"raise R0 to at least {(-T.BEAT0) / T.PER - T.M0 + 0.05:.1f}, or raise M0")
     if t1 > dur + 1e-3:
-        rmax = (dur - T.BEAT0) / T.PER - T.M0 - 0.05
-        err.append(f"R1 = {T.R1:g} runs {t1 - dur:.1f} s past the end of the song ({mus} is {dur:.1f} s long, the edit needs it until {t1:.1f} s): "
+        rmax = (dur - T.BEAT0) / T.PER - T.M0 - 0.05 - (1.0 / T.FPS) / T.PER      # one frame (N_FRAMES rounds up to half of one) + 0.05 beat
+        err.append(f"R1 = {T.R1:g} runs {t1 - dur:.3f} s past the end of the song ({mus} is {dur:.3f} s long, the picture needs it until "
+                   f"{t1:.3f} s = MUSIC_T0 + N_FRAMES / FPS): "
                    + (f"lower R1 (and FADE_OUT) to at most {rmax:.1f}, or choose an earlier M0" if rmax > T.R0 + 1 else
                       f"M0 = {T.M0} is itself too late (it is at {t0:.1f} s of the track): choose an earlier M0, the song has about {(dur - T.BEAT0) / T.PER:.0f} beats"))
     return err
@@ -179,16 +226,19 @@ def _where_in_take(T, r):
 
 def fast_forward(T):
     """MAX_SPEED (the timeline's ceiling for the playback speed; None = no ceiling) against the time maps, from the timeline alone (no pixels).
-    -> list of dicts, machine-readable: severity "ERROR" | "WARN", code, where (text), msg, fix, and for a run: segment, clip, n0, n1 (output
+    -> list of dicts, machine-readable: severity "ERROR" | "WARN", code, where (text), msg, fix, explicit (False when timeline.py never wrote
+    MAX_SPEED at all: a house timeline that omits its choice instead of stating MAX_SPEED = None, which means the same speed but is a decision
+    the user asked for), and for a run: segment, clip, n0, n1 (output
     frames), b0, b1 (beats), vmax, vmean. ERROR: one per run of frames above MAX_SPEED * 1.02, or a MAX_SPEED that is not a number.
     WARN: MAX_SPEED is None and frames play above 1.25x (the user must have asked for velocity). [] = nothing plays faster than the ceiling."""
     import numpy as np
     seg, sp = frame_speeds(T)
+    explicit = hasattr(T, "MAX_SPEED")                     # an absent name and an explicit None play the same, but only one is a stated choice
     out = []
     back = np.flatnonzero(sp < 0)
     if len(back):
         n0, n1 = int(back[0]), int(back[-1])
-        out.append(dict(severity="ERROR", code="backwards", segment=int(seg[n0]), clip=T.SEGS[int(seg[n0])].get("clip"), n0=n0, n1=n1,
+        out.append(dict(severity="ERROR", code="backwards", segment=int(seg[n0]), clip=T.SEGS[int(seg[n0])].get("clip"), n0=n0, n1=n1, explicit=explicit,
                         where="segment %d (%s), output frames %d-%d" % (int(seg[n0]), T.SEGS[int(seg[n0])].get("clip"), n0, n1),
                         msg="the footage plays backwards (%d frames, down to %.2fx)" % (len(back), sp.min()),
                         fix="a pinned speed (third number of an anchor) asks more than the neighbouring anchors allow: unpin it, or move the anchors so the speed between them is above a third of the pinned speed"))
@@ -196,16 +246,16 @@ def fast_forward(T):
     if ms is None:
         n = int((sp > 1.25).sum())
         if n:
-            out.append(dict(severity="WARN", code="no-ceiling", where="timeline.py", n=n, share=n / len(sp), vmax=float(sp.max()),
+            out.append(dict(severity="WARN", code="no-ceiling", where="timeline.py", n=n, share=n / len(sp), vmax=float(sp.max()), explicit=explicit,
                             msg="MAX_SPEED is None and %d output frames (%.0f %%) play above 1.25x, up to %.2fx" % (n, 100.0 * n / len(sp), sp.max()),
                             fix="deliver this only when the user asked for velocity / aceleracao; otherwise MAX_SPEED = 1.0 and re-draft (draft_ref_timeline.py)"))
         return out
     if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not ms > 0:
-        return out + [dict(severity="ERROR", code="max-speed", where="MAX_SPEED", msg="MAX_SPEED = %r is not a number above 0" % (ms,),
+        return out + [dict(severity="ERROR", code="max-speed", where="MAX_SPEED", msg="MAX_SPEED = %r is not a number above 0" % (ms,), explicit=explicit,
                            fix="1.0 = nothing plays faster than real time; None = no ceiling")]
     for r in fast_runs(T, ms):
         part, fix = _where_in_take(T, r)
-        out.append(dict(r, severity="ERROR", code="fast-forward",
+        out.append(dict(r, severity="ERROR", code="fast-forward", explicit=explicit,
                         where="segment %d (%s), output frames %d-%d (beats %.2f-%.2f), %s" % (r["segment"], r["clip"], r["n0"], r["n1"], r["b0"], r["b1"], part),
                         msg="plays up to %.2fx (mean %.2fx), above MAX_SPEED = %g" % (r["vmax"], r["vmean"], ms), fix=fix + "; raise MAX_SPEED only if the user asked for velocity"))
     return out
@@ -284,7 +334,7 @@ def fx_problems(T):
             if not ok:
                 E.append(f"segment {i} ({s.get('clip')}): white = {w!r} must be [(beat, 0..1), ...] with increasing beats inside the video (flash(beat) in timeline.py writes it)")
         sf = s.get("shot_from")
-        if sf is not None and not (isinstance(sf, (tuple, list)) and len(sf) == 2 and isinstance(sf[0], str) and glob.glob(f"src/{sf[0]}.*")):
+        if sf is not None and not (isinstance(sf, (tuple, list)) and len(sf) == 2 and isinstance(sf[0], str) and glob.glob(f"src/{glob.escape(sf[0])}.*")):
             E.append(f"segment {i} ({s.get('clip')}): shot_from = {sf!r} must be (clip, K) of a clip in src/")
     return E
 
@@ -310,7 +360,10 @@ def grid_problems(T):
     E = []
     if T.FPS != 60:
         E.append(f"FPS = {T.FPS!r} must be 60 (the clips and the output run at 60 fps; render.py and the frame math assume it)")
-    if abs(T.PER - 60.0 / T.BPM) > 1e-9:
+    if isinstance(T.BPM, bool) or not isinstance(T.BPM, (int, float)) or not T.BPM > 0:
+        E.append(f"BPM = {T.BPM!r} must be a number above 0: it is the song's tempo in beats per minute, PER = 60.0 / BPM is one beat in "
+                 "seconds, and every frame map divides by it")
+    elif abs(T.PER - 60.0 / T.BPM) > 1e-9:
         E.append(f"PER = {T.PER!r} is not 60.0 / BPM = {60.0 / T.BPM!r} (BPM = {T.BPM!r}): write PER = 60.0 / BPM")
     if abs(T.FPB - T.FPS * T.PER) > 1e-9:
         E.append(f"FPB = {T.FPB!r} is not FPS * PER = {T.FPS * T.PER!r}: the picture would drift {abs(T.FPB - T.FPS * T.PER) * (T.R1 - T.R0) / 60 * 1000:.1f} ms by the end; write FPB = FPS * PER")
@@ -391,8 +444,28 @@ def check(T, music=False, speed=True):
         E.append(f"CUTS_ON = {cuts!r} is not valid: it must be exactly \"bass\" (transitions on kicks / 808s, the default) or "
                  f"\"kills\" (transitions with the kill rhythm)" + (f"; did you mean \"{hint}\"?" if hint else ""))
     import look
-    E += look.problems(T)                                  # LOOK (edit options): misspelled option, value out of range, unknown grade / preset
+    E += look.problems(T)                                  # LOOK (edit options): misspelled option, wrong type, unknown grade / preset (an out-of-range number is clamped and printed by look.get(), not an error)
     E += fx_problems(T)                                    # the model edit's optional names: BUMPS, BOOMS, LUMA_IN, sound levels, IMPACT / ACC, white, shot_from
+    if T.SEGS:
+        # Names each style's renderer reads unconditionally, so an absent one is an AttributeError in the middle of the render rather than a message:
+        # the reference style reads LUMA_FADE (part of its SYNC 2 block), the house style PULSES (both documented in the examples).
+        if "view" in T.SEGS[0]:                            # the reference style's S() has a `view`; the house style's has not (as in check_store.py)
+            lf = getattr(T, "LUMA_FADE", None)
+            if lf is None:
+                E.append("LUMA_FADE is missing in timeline.py: the reference style ends with a luma fade (dark areas go black first, the bright HUD last) and "
+                         "render.py reads it on every frame. Write it in the music block, inside FADE_OUT: LUMA_FADE = (beat a, beat b), e.g. "
+                         "LUMA_FADE = (FADE_OUT[0] + 0.3, FADE_OUT[1] - 1.3)")
+            else:
+                try:
+                    ok = len(lf) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in lf) and T.R0 - 1e-9 <= lf[0] < lf[1] <= T.R1 + 1e-9
+                except TypeError:
+                    ok = False
+                if not ok:
+                    E.append(f"LUMA_FADE = {lf!r} must be (beat a, beat b) with R0 = {T.R0:g} <= a < b <= R1 = {T.R1:g}: the picture fades out between them "
+                             "(render.py divides by b - a)")
+        elif not hasattr(T, "PULSES"):
+            E.append("PULSES is missing in timeline.py: the house style's render.py reads it for the beats that carry no kill (backdrop pulse, a small zoom punch, "
+                     "an exposure pop), so it must be written even when the edit has none: PULSES = [] (timeline_example.py)")
     if not T.R0 < T.R1:
         E.append(f"R0 = {T.R0:g} must be smaller than R1 = {T.R1:g}")
     f0, f1 = T.FADE_OUT
@@ -406,7 +479,7 @@ def check(T, music=False, speed=True):
         tag = f"segment {i} ({clip})"
         if clip in nosrc or clip in nopts:
             (nosrc if clip in nosrc else nopts)[clip].append(i)
-        elif not glob.glob(f"src/{clip}.*"):
+        elif not glob.glob(f"src/{glob.escape(clip)}.*"):
             nosrc[clip] = [i]
         elif not os.path.exists(f"pts/{clip}.csv"):
             nopts[clip] = [i]
@@ -435,6 +508,27 @@ def check(T, music=False, speed=True):
                              f"({n_of[clip] / 60:.1f} s): check the kill's frame in kills.json")
             if lv not in (1, 2, 3):
                 E.append(f"{tag}: the kill at beat {k:g} has level {lv!r}: use 1 (normal), 2 (slow-motion finisher) or 3 (impact frame)")
+        # the camera's per-take windows (cam() / look() of render.py): a window with b == a divides by zero an hour into the render, and an
+        # amount outside 0 .. 0.6 (the zoom cap) is a typo. The reference style's push is a single number, not a list.
+        push = s.get("push")
+        for e in push if isinstance(push, (list, tuple)) else ():
+            try:
+                ok = (len(e) == 3 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in e) and e[1] > e[0] and 0 <= e[2] <= 0.6)
+            except TypeError:
+                ok = False
+            if not ok:
+                E.append(f"{tag}: push holds {e!r}: a push is (beat a, beat b, amount) with a < b (the camera pushes in over a .. b and is released after b) "
+                         "and an amount from 0 to 0.6 (2 % to 20 % is the house style)")
+                break
+        skill = s.get("skill")
+        for e in skill if isinstance(skill, (list, tuple)) else ():
+            try:
+                ok = len(e) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in e) and e[1] > e[0]
+            except TypeError:
+                ok = False
+            if not ok:
+                E.append(f"{tag}: skill holds {e!r}: a skill range is (beat a, beat b) with a < b (the beats an ability is on screen)")
+                break
         if prev is not None and abs(r0 - prev) > 1e-9:
             E.append(f"segment {i} ({clip}) starts at beat {r0:g} but segment {i - 1} ends at beat {prev:g}: "
                      "the first anchor of a segment must be on the beat where the previous segment's last anchor is")

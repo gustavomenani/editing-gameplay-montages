@@ -50,12 +50,12 @@ mkdir -p "$P" && cd "$P"
 cp "$SK"/scripts/*.* . && cp -r "$SK"/scripts/games "$SK"/models .     # *.* = files only (a bare * also hits the refstyle folder and cp fails); games/ = kill-finder profiles
 # THE DEFAULT STYLE (reference style, with or without a reference video): its render.py, audio.py, check.py, clipio.py,
 # densify.py, run.sh, deliver.sh replace the house ones on purpose (one project folder is one style):
-cp "$SK"/scripts/refstyle/*.* . && cp timeline_ref_example.py timeline.py     # FRAME = "vertical" is the default (draft_ref_timeline.py writes it)
+cp "$SK"/scripts/refstyle/*.* . && ([ -e timeline.py ] || cp timeline_ref_example.py timeline.py)   # FRAME = "vertical" is the default (draft_ref_timeline.py writes it). `[ -e ] ||` is not decoration: this block is also what an old project runs to take the new scripts, and an unconditional cp would replace the user's whole edit. The same guard on the house line below, and on every `cp ... timeline.py` in this skill
 # house style ONLY on the user's request ("estilo house"), instead of the line above:
-#   cp timeline_example.py timeline.py
+#   [ -e timeline.py ] || cp timeline_example.py timeline.py
 uv venv --python 3.11 venv311                       # 3.11: the RIFE binding has no wheels for 3.14
 uv pip install --python venv311/Scripts/python.exe -r requirements.txt
-PY=./venv311/Scripts/python
+export PY=./venv311/Scripts/python                  # export: run.sh and deliver.sh read $PY from the environment
 $PY doctor.py          # checks everything before the first ingest: packages, ffmpeg, the model, a real RIFE call on the GPU,
                        # Impact, disk, write permission, OneDrive / accents in the path. Ends with PRONTO (exit 0) or FALTA: ... (exit 1)
 # lyric words only: two more venvs, neither is venv311.
@@ -163,7 +163,7 @@ Two settings that depend on the PC:
 | `repair.py` | rebuilds a duplicated source frame in the store | `$PY repair.py c3:125` |
 | `fixends.py` | rebuilds the sub-frames next to every real frame in a store built without `rifeutil.Tween` (RIFE dead zone, see pitfalls.md); a store built by the bundled `prep.py` does not need it | `$PY fixends.py` |
 | `posmap.py` | measures where every stored sixteenth really sits (`posmap.json`, read by the refstyle `render.py`) | `$PY posmap.py` after any change of the store |
-| `check_store.py` | store covers the timeline (both layers of a house transition: `T.active`); no duplicates left; no damaged (cut-off) JPEG. Exit code 1 when footage is missing or a file is damaged | `$PY check_store.py`; `--delete` removes damaged files (then `prep.py ranges.json` rebuilds them) |
+| `check_store.py` | store covers the timeline (both layers of a house transition: `T.active`); the grid is fine enough where a take plays slower than 0.7x ("too coarse": a 4x store there renders a double-exposed slow motion); no run of duplicated real frames (a freeze); no damaged (cut-off) JPEG. Exit code 1 when footage is missing, too coarse, duplicated or a file is damaged | `$PY check_store.py`; `--delete` removes damaged files (then `prep.py ranges.json` rebuilds them) |
 | `render.py` | frames -> video part, or stills | `$PY render.py 0 742 part.mp4`, `$PY render.py 116 117 k.jpg`, `$PY render.py 100 140 s.jpg 4` |
 | `kill_lags.py` | gunshot onset relative to K for every kill, to the sample (`measure()`: house `audio.py` calls it per kill; clips are decoded on the file's clock) | `$PY kill_lags.py` |
 | `audio.py` | `mix.wav` + stems, and where each shot lands; `audio_report.json` per kill (the musical beat, the shown beat, the placement state, the onset in ms) | `$PY audio.py` |

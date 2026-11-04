@@ -233,20 +233,25 @@ def find(clips, cache=None):
 
 
 def groups(pairs):
-    """{b: (a, offset_s, [lo, hi])} - every duplicate clip -> the clip that keeps its kills (the top-most parent).
-    A chain (trim of a trim) is followed to the end and the offsets add up."""
+    """{b: (a, offset_s, [lo, hi])} - every duplicate clip -> the clip that keeps its kills (the top-most parent), the offset
+    from b's clock to that clip's (times in a = times in b + offset_s) and the part of b that lies inside it, in B'S OWN
+    seconds (frame_map() looks b's frames up in that clock).
+    A chain (trim of a trim) is followed to the end and the offsets and the ranges are COMPOSED: a parent's b_in_a_s is in
+    the parent's clock, so before it can be intersected with what the child already knows it must be shifted by the offset
+    collected so far. (The old groups() returned the direct parent's range: a trim of a trim was mapped into a range that
+    need not exist in the top clip - frames of C beyond the part of B that A holds were mapped anyway.)"""
     parent = {p["b"]: p for p in pairs}
     res = {}
     for b in parent:
         a, off, seen = b, 0.0, {b}
-        rng = None
+        lo, hi = parent[b]["b_in_a_s"]
         while a in parent and parent[a]["a"] not in seen:
             p = parent[a]
+            lo, hi = max(lo, p["b_in_a_s"][0] - off), min(hi, p["b_in_a_s"][1] - off)    # p's range is in p["b"]'s clock: shift it into b's
             off += p["offset_s"]
-            rng = p["b_in_a_s"] if rng is None else rng
             a = p["a"]
             seen.add(a)
-        res[b] = (a, round(off, 4), parent[b]["b_in_a_s"])
+        res[b] = (a, round(off, 4), [round(float(lo), 3), round(float(hi), 3)])
     return res
 
 

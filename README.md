@@ -73,7 +73,7 @@ edita esses clipes de valorant com a MESMA EDIÇÃO desse vídeo "referencia.mp4
 
 Depois é ir ajustando como faria com um editor humano: "o slow motion tá travado", "sincroniza melhor as letras", "tira aquela kill da raze". Cada versão sai como um arquivo novo (`_v1`, `_v2`, ...) ao lado dos clipes, e as anteriores ficam.
 
-Tempos medidos em vídeos de 37 a 46 segundos (GTX 1650): de 30 a 55 minutos de interpolação e de 12 a 16 minutos de render, os dois em segundo plano. Um ajuste que não mexe nos cortes só precisa de um render novo.
+Tempos medidos em vídeos de 37 a 46 segundos (GTX 1650): de 30 a 75 minutos de interpolação e de 12 a 16 minutos de render, os dois em segundo plano. Um ajuste que não mexe nos cortes só precisa de um render novo.
 
 ## Como funciona
 

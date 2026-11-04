@@ -70,10 +70,11 @@ What the house example does, and why:
    tail plus 4 to 7 beats for the end card. `FADE_OUT` = the last 2 to 3 beats.
 4. `music_pulses.py` lists the kicks (`low`) and the snares or claps (`mid`; house example: every 4 beats from
    beat 1); hats alone (`high` only) do not count. Kills go only on kicks and snares. Where the
-   transitions go is the user's choice, `CUTS_ON` in the timeline (briefing): `"bass"` (default, an
-   editor's note: "as transições rolarem nos graves da música, não no snare ... vai ficar mais fino")
+   transitions go is the user's choice, `CUTS_ON` in the timeline (briefing). The house style's default is
+   `"bass"` (an editor's note: "as transições rolarem nos graves da música, não no snare ... vai ficar mais fino");
+   the skill's default style uses `"kills"` (SKILL.md). `"bass"`
    puts every transition on a kick / bass hit, so the cut lands with the weight of the track and the
-   snare stays for the accents inside a take; `"kills"` follows the kill rhythm, as the house example does. Strong hits
+   snare stays for the accents inside a take; `"kills"` follows the kill rhythm. Strong hits
    without a kill or a transition go into `PULSES` with a weight of 0.5 to 0.9. `music_spec.py` shows
    the same thing as a picture when a hit is unclear.
 5. Use the structure: a breakdown before the drop carries the lead-in and a riser; a break near the end
@@ -203,9 +204,9 @@ An overlapping transition is centred on the first anchor of the incoming segment
 both clips for half its length beyond the anchors (`ranges.py` accounts for it). Keep kills out of it:
 the next kill at least 1.5 beats after its centre. With `CUTS_ON = "bass"`, centre it (a `zcut`: put the
 cut) on a kick or bass hit: in trap the 808s are sparse, so use the kicks that carry no kill;
-`music_pulses.py`'s PLACEMENT CHECK then tests every cut against the kicks (a kick of strength 0.4 or more within 8.3 ms) and must end without a FAIL. The example
-timeline is `"kills"` (0 of the house example's 13 transitions sit on a kick, measured): with `"bass"` do not copy its
-transition beats. Vary direction and kind; the house example uses 4 whips, 4 zcuts, 2 zooms, 1 spin, 1 dissolve and 1 soft.
+`music_pulses.py`'s PLACEMENT CHECK then tests every cut against the kicks (a kick of strength 0.4 or more within 8.3 ms) and must end without a FAIL. The shipped example
+timeline carries `CUTS_ON = "bass"`, so 0 of the house example's 13 transitions sit on a kick: that example cannot pass the check
+as shipped, and its transition beats must not be copied into a `"kills"` edit. Vary direction and kind; the house example uses 4 whips, 4 zcuts, 2 zooms, 1 spin, 1 dissolve and 1 soft.
 
 ## Sound
 

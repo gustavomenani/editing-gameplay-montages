@@ -8,6 +8,7 @@ the editor confirm K: the muzzle flash / recoil must start on the tile "+0" and 
 
 usage: python mykills.py [id,id,...]     -> kills.json  {id: {clip, K, feed, how, conf, verified, ...}},  gal_NN.jpg (7 kills per sheet)
 Row layout: full frame at K-12, K-6, K-2 | zoom on the weapon at K-1, K, K+1 | full frame at K, K+4, K+10
+kills.json may also hold kills_auto.py's entries (another layout, its own ids): they are KEPT and merged, never dropped.
 
 kills.json fields (the drafters read them):
   how        "ammo"        ammo step on K and no contradicting signal on K-1 / K+1, the feed row 5..12 frames after K   VERIFIED
@@ -32,11 +33,11 @@ only = set(int(x) for x in sys.argv[1].split(",")) if len(sys.argv) > 1 else Non
 PROF = kverify.load_profile("valorant")
 TYPICAL_LAG = 7     # frames from the shot to its feed row: median of 25 kills measured frame by frame (6: 5x, 7: 15x, 8: 2x, 9-11: 1x each)
 out = json.load(open("kills.json")) if os.path.exists("kills.json") else {}
-_auto = [i for i, v in out.items() if "method" in v]          # entries of kills_auto.py (another layout, numbered from 0 like these)
+# kills_auto.py's entries (another layout, numbered from 0 like these): KEPT and merged at the end of this run. A project may run both
+# tools on one kills.json (pipeline.md calls them interchangeable); dropping them lost every audited kill.
+_auto = {i: v for i, v in out.items() if "method" in v}
 for i in _auto:
     del out[i]
-if _auto:
-    print("kills.json held %d entries written by kills_auto.py: dropped, they are not detection ids of this project" % len(_auto))
 _old = [i for i, v in out.items() if "how" not in v]          # written by an older mykills.py (conf ammo / ammo-loose / guess, white-digit rule)
 for i in _old:                                                # NOT measured by the new detector: unverified until it has been (same as kverify.py --update)
     out[i]["how"] = out[i].get("conf") if out[i].get("conf") in ("ammo-loose", "guess") else "guess"
@@ -132,6 +133,19 @@ for k in order:
 if rows:
     sheet += 1
     cv2.imwrite("gal_%02d.jpg" % sheet, cv2.cvtColor(np.vstack(rows), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 86])
+if _auto:                                                     # put kills_auto.py's entries back: an id stays when no detection of this project has it,
+    _next = max([int(i) for i in list(out) + list(_auto)] + [-1]) + 1      # else the entry moves above every other id (nothing is dropped)
+    moved = []
+    for i, v in sorted(_auto.items(), key=lambda q: int(q[0])):
+        if i in out:
+            moved.append((i, str(_next)))
+            out[str(_next)] = v
+            _next += 1
+        else:
+            out[i] = v
+    print("kills.json held %d entries written by kills_auto.py: kept%s" % (
+        len(_auto), "" if not moved else "; %d moved above the detection ids because a detection of this run has their id (%s: a plan entry that names them needs the new id)" % (
+            len(moved), ", ".join("%s -> %s" % m for m in moved))))
 json.dump(out, open("kills.json", "w"), indent=1)
 print("kills.json: %d kills; sheets gal_01..gal_%02d.jpg" % (len(out), sheet))
 if missing:

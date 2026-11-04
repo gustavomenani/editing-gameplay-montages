@@ -18,7 +18,9 @@ Per cue (first word of a merged cue) the table prints: the cue beat and song tim
   no-attack   no confident attack within 0.25 s (legato syllable, hum): WARN
   stale       the cue start differs from lyrics/cue_audit.json by > 0.3 ms: the cues were edited after the table was made
 Also listed: words that move > 8.3 ms between the sub-frame runs of the alignment (WARN) and the stability numbers of the
-sidecar. Exit code 1 when there is an ERROR (a cue not on an attack and not flagged), 0 otherwise."""
+sidecar. Exit code 1 when there is an ERROR (a cue not on an attack and not flagged), and also when the stem has NO confident
+attack anywhere: then every cue is "no-attack" (a WARN), nothing was verified, and the audit says NOT CONCLUSIVE instead of
+exiting 0 (gate.py turns that ERROR into a word-sung item it can see)."""
 import argparse
 import json
 import os
@@ -59,6 +61,7 @@ cues = json.load(open(args.cues, encoding="utf-8"))
 stem = LA.Stem(vocals, t0)
 at = np.array([a["t"] for a in stem.att])
 conf = np.array([a["g"] >= 0.95 for a in stem.att], dtype=bool)          # >= ~7.5 dB, or a voiced note starts there
+n_conf = int(conf.sum())
 adv = side["adv"] if side else 0.0
 first_word = {}                                              # cue index -> the first word record of the sidecar
 if side:
@@ -115,6 +118,12 @@ if len(dev):
     print("%d cues: %d within %.0f ms of a confident attack (median |cue - attack| %.1f ms, 90 %% within %.1f ms, max %.1f ms); "
           "%d without a confident attack nearby" % (len(rows), int((dev <= args.tol).sum()), args.tol, np.median(dev),
                                                     np.percentile(dev, 90), dev.max(), len(rows) - len(dev)))
+if cues and not n_conf:
+    # No confident attack anywhere: every cue above is a WARN only because nothing could be checked, and the audit used to exit 0
+    # having verified nothing. Say it once and make it an ERROR the gate reports (gate.py accepts exit 1 with an ERROR block).
+    print("lyrics audit: NOT CONCLUSIVE: the voice stem has no confident attack (>= 8 dB in 60 ms, or a voiced note starting there) anywhere "
+          "(%d attack(s) measured): none of the %d cue starts was verified against the singing" % (len(at), len(cues)))
+    err.append(("(stem)", None, "no confident attack in %s: is it the isolated voice (lyrics_stem.py) and is T0 right? The cue starts were NOT verified" % vocals))
 if side:
     sp = np.array([w["spread"] for w in side["words"] if w["kind"] != "pin"])
     if len(sp):
@@ -126,8 +135,8 @@ if warn:
     for text, b, note in warn:
         print("  %-10s beat %7.3f: %s" % (text, b, note))
 if err:
-    print("\nERROR (%d): cues that are not on a sung attack:" % len(err))
+    print("\nERROR (%d): %s" % (len(err), "the cue starts were NOT verified against the singing" if (cues and not n_conf) else "cues that are not on a sung attack:"))
     for text, b, note in err:
-        print("  %-10s beat %7.3f: %s" % (text, b, note))
+        print(("  %-10s beat %7.3f: %s" % (text, b, note)) if b is not None else ("  %-10s %s" % (text, note)))
     sys.exit(1)
 print("\nlyrics audit: no ERROR")

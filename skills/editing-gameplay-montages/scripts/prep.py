@@ -1,7 +1,8 @@
 """Build the sub-frame store used by the renderer.
 
 For every requested source range: read the real frames by exact index, rebuild frames the recording
-duplicated, and interpolate between consecutive frames with RIFE. A sub-frame is stored as
+duplicated (also the interval that straddles a 96-frame chunk boundary: its sub-frames belong to the
+previous chunk), and interpolate between consecutive frames with RIFE. A sub-frame is stored as
 store/<clip>/<key>.jpg with key = frame_index * 16 + sixteenths, so a 4x grid uses sixteenths
 0, 4, 8, 12 and a dense 16x grid uses all of them. Existing files are kept (resumable).
 
@@ -67,6 +68,7 @@ def run(clip, t0, t1, factor, rife, log):
         # hiccup: interpolate straight across it, from the real frames on both sides
         prv = list(range(len(fr)))                   # for every frame: the real frame at or before it ...
         nxt = list(range(1, len(fr) + 1))            # ... and the next real frame after it
+        boundary = False                             # the run's real frame before it is the last frame of the previous chunk
         i = 1
         while i < len(fr):
             if mo[i - 1] < DUP and med > 0.6:
@@ -76,6 +78,7 @@ def run(clip, t0, t1, factor, rife, log):
                 if j + 1 < len(fr) and j - i + 1 <= 3:
                     for q in range(i - 1, j + 1):
                         prv[q], nxt[q] = i - 1, j + 1
+                    boundary = i == 1
                     if (clip, off + i, j - i + 1) not in log:
                         log.append((clip, off + i, j - i + 1))
                         fixed += j - i + 1
@@ -94,6 +97,16 @@ def run(clip, t0, t1, factor, rife, log):
                     continue
                 save(clip, k, sub(j - off, s))
                 made += 1
+        # the interval that straddles the chunk boundary: frame n-1 belongs to the previous chunk, so its sub-frames were
+        # already written there - from this same duplicate pair when that chunk could not see the run's real successor (the
+        # end of a range or of the clip is one frame further on), from an older build where this repair did not exist, or
+        # from a range that simply started here. Rebuild every in-between of that frame that is in the store from the real
+        # neighbours; after the usual lookahead they are the same pictures, so this only ever removes a hold.
+        if boundary and n > 0:
+            for s in range(1, 16):
+                k = (n - 1) * 16 + s
+                if os.path.exists(path(clip, k)):
+                    save(clip, k, sub(0, s))
         if not os.path.exists(path(clip, m * 16)):
             save(clip, m * 16, sub(m - off, 0))
             made += 1

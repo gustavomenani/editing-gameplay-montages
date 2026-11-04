@@ -14,7 +14,9 @@ From Python:  audit(video, T, legacy=None, out=print, count_check=True, picture=
 
 What is measured (S1 .. S10) and how
   S1 container   video pts: 1/60 s lattice (ticks per frame from the time base), count == T.N_FRAMES. A step off by more than half a tick: WARN pts-gap;
-                 the cumulative error above 1 ms: ERROR pts-gap; another count: ERROR frame-count.
+                 the cumulative error above 1 ms: ERROR pts-gap; another count: ERROR frame-count. The START of the tracks: the first packet at pts 0
+                 (half a tick of rounding) and the sound starting with the picture (within a frame): else ERROR pts-gap (an -itsoffset, an elst / edit
+                 list or a mux offset: the lattice inside the track is perfect and every other check passes).
   S2 audio/song  the decoded audio (aresample=async=1:first_pts=0, so a late or early track start shows) against the song at T.MUSIC_T0: band-pass 80-6000 Hz,
                  FFT cross-correlation, parabolic peak = the lag in samples; then 2 s windows every 1 s (min, max, slope). |lag| > 1 ms: ERROR av-offset
                  (> 0.25 ms WARN); the lag moving by > 1 ms inside the section: ERROR av-drift; no match (peak < 0.5): ERROR audio-unmatched.
@@ -165,14 +167,33 @@ def container(video, T, plan, A):
     step = den / num / T.FPS                                          # ticks per frame (256 at 1/15360)
     bad = np.nonzero(np.abs(d - step) > 0.5)[0]
     cum = (pts - pts[0] - np.arange(len(pts)) * step) * num / den * 1000.0          # ms against the 1/60 s lattice
-    st = {x["codec_type"]: float(x.get("start_time") or 0) for x in streams}
+
+    def start(kind):
+        s = next((x for x in streams if x.get("codec_type") == kind), None)
+        try:
+            return float(s.get("start_time"))
+        except (TypeError, ValueError, AttributeError):
+            return None                                                     # "N/A" (a matroska without one): not measurable
+    sv, sa = start("video"), start("audio")
     A.say("container  frames %d (timeline %d)  pts step %s ticks (lattice %g): %d irregular step(s)%s | max |pts - n/60| %.3f ms" % (
         len(pts), T.N_FRAMES, sorted(set(int(v) for v in d))[:4], step, len(bad),
         " at frame " + ", ".join(str(int(i) + 1) for i in bad[:6]) if len(bad) else "", float(np.abs(cum).max()) if len(cum) else 0.0))
-    A.say("           stream start_time video %.6f s audio %.6f s" % (st.get("video", 0), st.get("audio", 0)))
+    A.say("           stream start_time video %s s audio %s s" % (("%.6f" % sv) if sv is not None else "n/a", ("%.6f" % sa) if sa is not None else "n/a"))
     if A.count_check and len(pts) != T.N_FRAMES:
         A.add("ERROR", "frame-count", video, "%d frames in the file, %d in the timeline (a dropped or repeated frame, a truncated render, or another timeline)" % (len(pts), T.N_FRAMES),
               "render the master again: bash run.sh master.mp4")
+    # WHERE the tracks start, not only the lattice inside them: pts[0] is where the picture begins. An -itsoffset, an elst / edit list
+    # or a mux offset keeps a perfect lattice from its own first packet, so every check below passes while the whole edit plays that
+    # far from its sound. A frame is 1/60 s: a start difference of a frame or more is a late / early track, whatever moved it.
+    late = []
+    if len(pts) and abs(pts[0]) > 0.5:
+        late.append("the picture starts at pts %d = %.6f s, not at 0" % (int(pts[0]), float(pts[0]) * num / den))
+    if sv is not None and sa is not None and abs(sv - sa) > 1.0 / T.FPS:
+        late.append("the sound starts at %.6f s, %.1f ms away from the picture (more than a frame)" % (sa, abs(sv - sa) * 1000.0))
+    if late:
+        A.add("ERROR", "pts-gap", "start of the tracks", "; ".join(late) + ": every picture event sits that far from its sound",
+              "re-mux the master from 0 (run.sh's last ffmpeg line: ffmpeg -i video.mp4 -i mix.wav -map 0:v -map 1:a ...) with no "
+              "-itsoffset, no -avoid_negative_ts and no elst edit list on the picture")
     if len(cum) and np.abs(cum).max() > 1.0:
         n_bad = int(np.argmax(np.abs(cum) > 1.0))
         A.add("ERROR", "pts-gap", "output frame %d on" % n_bad, "the timestamps drift from the 1/%d s lattice by %.2f ms (a join of the parts, a dropped or repeated frame)" % (T.FPS, float(np.abs(cum).max())),
@@ -934,6 +955,10 @@ def audit(video, T, legacy=None, out=print, count_check=True, picture=True, summ
               "write the kill's beat from hits.json (music_hits.py): hit(t_attack)")
 
     # ---------------- bumps (and the house style's pulses): the pop on nearest_frame(beat) - HIT_LEAD
+    if plan.bumps and P is None:                                        # picture=False: cuts / shots / words already say "not measured", never a silent pass
+        A.say("bumps / pulses: %d, not measured (the frames were not decoded: --no-pixels)" % len(plan.bumps))
+        A.add("WARN", "bump-unmeasured", "beats " + ", ".join("%.3f" % b["beat"] for b in plan.bumps[:12]) + (" ..." if len(plan.bumps) > 12 else ""),
+              "%d bump(s) / pulse(s) could not be measured: the frames were not decoded (--no-pixels), so they are NOT verified" % len(plan.bumps), "")
     if plan.bumps and P is not None:
         dl = np.zeros(P.n)
         dl[1:] = np.diff(P.Y)
